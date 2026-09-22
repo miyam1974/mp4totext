@@ -33,7 +33,7 @@ jobs:
       - name: Build portable app
         run: pyinstaller --noconfirm packaging/mp4totext.spec
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: mp4totext-windows
           path: dist/mp4totext
