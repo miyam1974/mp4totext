@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mp4totext"
+version = "0.1.0"
+description = "Local MP4 transcription engine and Windows application"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "av>=14,<17",
+    "faster-whisper>=1.1,<2",
+    "huggingface-hub>=1.29,<2",
+    "platformdirs>=4.3,<5",
+    "tqdm>=4.67,<5",
+    "truststore>=0.10,<1",
+]
+
+[project.scripts]
+mp4totext = "mp4totext.cli:app"
+mp4totext-gui = "mp4totext.gui.app:main"
+
+[project.optional-dependencies]
+cli = ["typer>=0.15,<1"]
+gui = ["PySide6>=6.8,<7"]
+dev = [
+    "mypy>=1.14,<2",
+    "pytest>=8.3,<10",
+    "pytest-cov>=6,<8",
+    "pytest-qt>=4.4,<5",
+    "ruff>=0.9,<1",
+    "types-tqdm>=4.67,<5",
+]
+build = ["pyinstaller>=6.11,<7"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mp4totext"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src", "tests"]
+
+[[tool.mypy.overrides]]
+module = ["faster_whisper", "faster_whisper.*"]
+ignore_missing_imports = true
