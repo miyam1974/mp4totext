@@ -2,20 +2,17 @@ import json
 
 from mp4totext.domain import Transcript
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
-def render_text(transcript: Transcript, summary: str | None = None) -> str:
+def render_text(transcript: Transcript) -> str:
     text = transcript.text
-    if summary:
-        return f"【要約】\n{summary}\n\n【文字起こし】\n{text}\n"
     return f"{text}\n" if text else ""
 
 
-def render_json(transcript: Transcript, summary: str | None = None) -> str:
+def render_json(transcript: Transcript) -> str:
     document = {
         "schema_version": SCHEMA_VERSION,
-        "summary": summary,
         "language": transcript.language,
         "language_probability": transcript.language_probability,
         "duration_seconds": transcript.duration_seconds,

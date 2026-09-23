@@ -29,7 +29,6 @@ class TranscriptionWorker(QObject):
         formats: tuple[OutputFormat, ...],
         options: TranscriptionOptions,
         overwrite: bool,
-        include_summary: bool,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         super().__init__()
@@ -39,7 +38,6 @@ class TranscriptionWorker(QObject):
         self._formats = formats
         self._options = options
         self._overwrite = overwrite
-        self._include_summary = include_summary
         self._clock = clock
         self._cancellation = CancellationToken()
 
@@ -69,7 +67,6 @@ class TranscriptionWorker(QObject):
                         options=self._options,
                         output_dir=self._output_dir,
                         overwrite=self._overwrite,
-                        include_summary=self._include_summary,
                         progress=self._emit_progress,
                         cancellation=self._cancellation,
                     )

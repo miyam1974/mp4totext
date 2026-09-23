@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from PySide6.QtCore import QSettings
@@ -24,8 +25,24 @@ def test_window_accepts_a_selected_mp4(qtbot: QtBot) -> None:
     assert window.drop_area.label.text() == "2 ファイルを選択中"
     assert window.file_list.count() == 2
     assert window._selected_formats() == (OutputFormat.TXT,)
-    assert window.summary_check.isChecked()
     assert window.file_list.item(0).text().endswith("/ 予測: 算出不可")
+
+
+def test_sources_can_be_added_while_transcription_is_running(qtbot: QtBot) -> None:
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._add_sources((Path("meeting.mp4"),))
+    window._set_running(True)
+    cast(Any, window)._thread = object()
+
+    assert window.drop_area.isEnabled()
+
+    window._add_sources((Path("review.mp4"),))
+
+    assert window.file_list.count() == 2
+    assert not window.start_button.isEnabled()
+
+    cast(Any, window)._thread = None
 
 
 def test_window_requires_at_least_one_output_format(qtbot: QtBot) -> None:
@@ -135,6 +152,21 @@ def test_model_download_updates_status_and_keeps_cancel_enabled(
 
     assert window.model_status_label.text() == "モデル: small / ダウンロード済み (1.0 KiB)"
     assert window.cancel_button.text() == "キャンセル"
+
+
+def test_cancelling_active_file_allows_restarting_the_queue(qtbot: QtBot) -> None:
+    window = MainWindow()
+    qtbot.addWidget(window)
+    source = Path("meeting.mp4")
+    window._add_sources((source,))
+    window._on_file_started(source, 1, 1, 0)
+
+    window._on_cancelled()
+    window._job_finished()
+
+    assert window._states == [QueueState.PENDING]
+    assert window.file_list.item(0).text().startswith("[待機]")
+    assert window.start_button.isEnabled()
 
 
 def test_window_uses_requested_initial_height(qtbot: QtBot) -> None:

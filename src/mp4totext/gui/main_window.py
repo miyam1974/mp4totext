@@ -169,9 +169,6 @@ class MainWindow(QMainWindow):
         self.json_check.toggled.connect(self._refresh_queue_display)
         settings_row.addWidget(self.txt_check)
         settings_row.addWidget(self.json_check)
-        self.summary_check = QCheckBox("要約を先頭に追加")
-        self.summary_check.setChecked(True)
-        settings_row.addWidget(self.summary_check)
         settings_row.addSpacing(24)
         settings_row.addWidget(QLabel("モデル"))
         self.model_combo = QComboBox()
@@ -256,7 +253,7 @@ class MainWindow(QMainWindow):
                 self.file_list.addItem(self._queue_text(source, QueueState.PENDING))
         self.drop_area.label.setText(f"{len(self._sources)} ファイルを選択中")
         self.status_label.setText("準備完了")
-        self.start_button.setEnabled(bool(self._sources))
+        self.start_button.setEnabled(self._thread is None and bool(self._sources))
         self._update_queue_buttons()
 
     def _remove_selected(self) -> None:
@@ -357,7 +354,6 @@ class MainWindow(QMainWindow):
             formats,
             TranscriptionOptions(model_name=self.model_combo.currentText()),
             overwrite,
-            self.summary_check.isChecked(),
         )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
@@ -377,13 +373,12 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(not running and self._has_pending())
         self.cancel_button.setEnabled(running)
         self.cancel_button.setText("キャンセル")
-        self.drop_area.setEnabled(not running)
         self.file_list.setEnabled(True)
         self.model_combo.setEnabled(not running)
         self.delete_model_button.setEnabled(not running)
         self.delete_app_data_button.setEnabled(not running)
         self.exit_button.setEnabled(not running)
-        for checkbox in (self.txt_check, self.json_check, self.summary_check):
+        for checkbox in (self.txt_check, self.json_check):
             checkbox.setEnabled(not running)
         self._update_queue_buttons()
 
@@ -459,6 +454,10 @@ class MainWindow(QMainWindow):
         self._model_refresh_pending = False
         self.status_label.setText("キャンセルしました")
         self.active_file_label.setText("処理対象: なし")
+        for row, state in enumerate(self._states):
+            if state is QueueState.ACTIVE:
+                self._states[row] = QueueState.PENDING
+        self._refresh_queue_display()
 
     def _cancel(self) -> None:
         if self._worker is not None:

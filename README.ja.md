@@ -21,11 +21,11 @@ py -3.13 -m venv .venv
 
 ## CLI
 
-既定ではTXTを入力MP4と同じフォルダーへ出力します。JSON出力や抽出要約も選択できます。
+既定ではTXTを入力MP4と同じフォルダーへ出力します。JSON出力も選択できます。
 
 ```powershell
 .\.venv\Scripts\mp4totext.exe .\meeting.mp4
-.\.venv\Scripts\mp4totext.exe .\meeting.mp4 -f txt -f json --language ja --summary
+.\.venv\Scripts\mp4totext.exe .\meeting.mp4 -f txt -f json --language ja
 ```
 
 ## Windowsアプリ
@@ -56,7 +56,7 @@ Windowsアプリの保存先は、初回起動時はWindowsの「ドキュメン
 
 未処理のファイルは一覧で選択し、「削除」「上へ」「下へ」で待機キューを編集できます。文字起こし中も、現在処理中のファイルを除く待機中のファイルは編集できます。「終了」は処理していないときにアプリを閉じます。
 
-「要約を先頭に追加」は既定で有効です。原文から重要度の高い文を選ぶ抽出要約をTXTの先頭とJSONの`summary`項目へ追加します。生成AIによる書き換えではないため、原文にない内容は追加しません。
+文字起こし中でも動画のドロップや追加ができ、待機キューへ追加されて現在のバッチの後に処理されます。
 
 ## 文字起こしモデル
 

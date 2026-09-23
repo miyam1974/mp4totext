@@ -29,7 +29,6 @@ def test_worker_processes_files_in_order_with_one_transcriber(
         (OutputFormat.TXT,),
         TranscriptionOptions(),
         False,
-        True,
     )
     started: list[Path] = []
     worker.file_started.connect(lambda source, index, total: started.append(source))
@@ -47,7 +46,6 @@ def test_worker_can_remove_and_reorder_pending_files() -> None:
         None,
         (OutputFormat.TXT,),
         TranscriptionOptions(),
-        False,
         False,
     )
 
@@ -76,7 +74,6 @@ def test_worker_reports_file_size_model_and_elapsed_time(
         (OutputFormat.TXT,),
         TranscriptionOptions(model_name="small"),
         False,
-        True,
         clock=lambda: next(times),
     )
     started: list[tuple[Path, int]] = []

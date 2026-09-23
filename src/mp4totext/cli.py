@@ -42,10 +42,6 @@ def transcribe(
         bool,
         typer.Option("--overwrite", help="既存の出力ファイルを上書きします。"),
     ] = False,
-    summary: Annotated[
-        bool,
-        typer.Option("--summary", help="抽出要約を出力の先頭に追加します。"),
-    ] = False,
 ) -> None:
     """MP4からTXTまたはJSONを生成します。"""
     formats = output_format or [OutputFormat.TXT]
@@ -57,7 +53,6 @@ def transcribe(
             options=TranscriptionOptions(model_name=model, language=language),
             output_dir=output_dir,
             overwrite=overwrite,
-            include_summary=summary,
             progress=_show_progress,
         )
     except (InvalidMediaError, OutputExistsError, ValueError) as error:

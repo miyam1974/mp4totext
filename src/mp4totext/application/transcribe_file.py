@@ -8,7 +8,7 @@ from pathlib import Path
 from mp4totext.domain import ProgressEvent, ProgressStage, TranscriptionOptions
 from mp4totext.engine import CancellationToken, Transcriber
 from mp4totext.engine.protocol import ProgressCallback
-from mp4totext.output import render_json, render_text, summarize
+from mp4totext.output import render_json, render_text
 
 
 class OutputFormat(StrEnum):
@@ -34,7 +34,6 @@ def transcribe_file(
     options: TranscriptionOptions | None = None,
     output_dir: Path | None = None,
     overwrite: bool = False,
-    include_summary: bool = False,
     progress: ProgressCallback | None = None,
     cancellation: CancellationToken | None = None,
 ) -> TranscriptionResult:
@@ -58,10 +57,9 @@ def transcribe_file(
     if progress is not None:
         progress(ProgressEvent(ProgressStage.SAVING, None, "結果を保存しています"))
 
-    summary = summarize(transcript.text) if include_summary else None
     renderers = {
-        OutputFormat.TXT: lambda item: render_text(item, summary),
-        OutputFormat.JSON: lambda item: render_json(item, summary),
+        OutputFormat.TXT: render_text,
+        OutputFormat.JSON: render_json,
     }
     temporary_paths: list[Path] = []
     try:

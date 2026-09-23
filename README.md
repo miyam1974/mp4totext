@@ -21,11 +21,11 @@ py -3.13 -m venv .venv
 
 ## CLI
 
-By default, a TXT file is written to the same folder as the input MP4. JSON output and an extractive summary can also be selected.
+By default, a TXT file is written to the same folder as the input MP4. JSON output can also be selected.
 
 ```powershell
 .\.venv\Scripts\mp4totext.exe .\meeting.mp4
-.\.venv\Scripts\mp4totext.exe .\meeting.mp4 -f txt -f json --language ja --summary
+.\.venv\Scripts\mp4totext.exe .\meeting.mp4 -f txt -f json --language ja
 ```
 
 ## Windows app
@@ -56,7 +56,7 @@ Estimates are rough approximations based on video file size. Actual processing t
 
 You can select unprocessed files in the list and use "Remove," "Move up," and "Move down" to edit the pending queue. While transcription is running, pending files other than the one currently being processed remain editable. "Exit" closes the app only when nothing is being processed.
 
-"Add summary at the top" is enabled by default. It adds an extractive summary — sentences selected from the original text by importance — to the top of the TXT output and to the JSON `summary` field. Since this is not a rewrite by generative AI, it never adds content that isn't in the original text.
+You can drop or add more MP4 files while transcription is running; they are appended to the pending queue and processed after the current batch.
 
 ## Transcription model
 

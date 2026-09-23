@@ -48,17 +48,3 @@ def test_transcribe_file_does_not_overwrite_by_default(tmp_path: Path) -> None:
 def test_transcribe_file_requires_an_output_format(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         transcribe_file(tmp_path / "meeting.mp4", FakeTranscriber(), ())
-
-
-def test_transcribe_file_can_prepend_summary(tmp_path: Path) -> None:
-    source = tmp_path / "meeting.mp4"
-    source.touch()
-
-    transcribe_file(
-        source,
-        FakeTranscriber(),
-        (OutputFormat.TXT,),
-        include_summary=True,
-    )
-
-    assert (tmp_path / "meeting.txt").read_text(encoding="utf-8").startswith("【要約】\n")
