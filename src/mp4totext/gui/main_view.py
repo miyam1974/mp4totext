@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 from mp4totext.gui.file_queue_list import FileQueueList
 from mp4totext.gui.i18n import Language, Translator
 
-_ROW_LABEL_WIDTH = 88
+_ROW_LABEL_WIDTH = 70
 
 
 class MainView(QWidget):
