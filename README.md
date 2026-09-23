@@ -30,6 +30,8 @@ By default, a TXT file is written to the same folder as the input MP4. JSON outp
 
 ## Windows app
 
+![MP4 to Text with the English interface](docs/images/mp4totext-en.png)
+
 Use **EN / JP** at the top right to switch the interface language at any time.
 Japanese is the default; your choice is saved for the next launch. Labels, time
 estimates, progress, and standard dialogs follow the selected language. File
