@@ -6,9 +6,9 @@ import pytest
 from mp4totext.application import OutputFormat, TranscriptionResult
 from mp4totext.application.queue import QueueState
 from mp4totext.domain import TranscriptionOptions
+from mp4totext.domain.processing_history import ProcessingMetrics
 from mp4totext.engine import TranscriptionCancelled
 from mp4totext.gui import job_controller
-from mp4totext.gui.processing_history import ProcessingMetrics
 
 
 def test_worker_processes_files_in_order_with_one_transcriber(

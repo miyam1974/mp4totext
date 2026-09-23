@@ -16,22 +16,18 @@ from mp4totext.application.output_plan import (
 )
 from mp4totext.application.queue import QueueState, TranscriptionQueue
 from mp4totext.domain import ProgressEvent, ProgressStage, TranscriptionOptions
+from mp4totext.domain.processing_history import ProcessingMetrics, estimate_rate, estimate_seconds
 from mp4totext.engine.model_cache import (
     delete_app_cache,
     delete_model_cache,
     format_size,
     inspect_model_cache,
 )
+from mp4totext.gui.formatters import format_duration
+from mp4totext.gui.history_store import append_history, load_history
 from mp4totext.gui.i18n import Language, Translator, set_qt_language
 from mp4totext.gui.job_controller import TranscriptionWorker
 from mp4totext.gui.main_view import MainView
-from mp4totext.gui.processing_history import (
-    ProcessingMetrics,
-    append_history,
-    estimate_seconds,
-    format_duration,
-    load_history,
-)
 from mp4totext.gui.styles import STYLESHEET
 
 _QUEUE_STATE_KEYS = {
@@ -605,9 +601,17 @@ class MainWindow(QMainWindow):
     def _is_removable(self, row: int) -> bool:
         return 0 <= row < len(self._states) and self._states[row] is not QueueState.ACTIVE
 
-    def _queue_text(self, source: Path, state: QueueState) -> str:
-        size_text = self._file_size_text(source)
-        prediction = self._prediction_text(source)
+    def _queue_text(self, source: Path, state: QueueState, rate: float | None) -> str:
+        try:
+            file_size = source.stat().st_size
+        except OSError:
+            size_text = prediction = self.t("size_unavailable")
+        else:
+            size_text = f"{file_size / (1024 * 1024):.1f} MB"
+            prediction = (
+                format_duration(rate * file_size, self._i18n.language)
+                if rate is not None and file_size > 0 else self.t("history_none")
+            )
         state_text = self.t(_QUEUE_STATE_KEYS[state])
         if self._is_transcribed(source):
             return self.t(
@@ -622,29 +626,8 @@ class MainWindow(QMainWindow):
             "queue_item", state=state_text, name=source.name, size=size_text, prediction=prediction
         )
 
-    def _file_size_text(self, source: Path) -> str:
-        try:
-            size_bytes = source.stat().st_size
-        except OSError:
-            return self.t("size_unavailable")
-        return f"{size_bytes / (1024 * 1024):.1f} MB"
-
-    def _prediction_text(self, source: Path) -> str:
-        try:
-            file_size = source.stat().st_size
-        except OSError:
-            return self.t("size_unavailable")
-        predicted = estimate_seconds(
-            self.ui.model_combo.currentText(),
-            file_size,
-            load_history(self._settings),
-        )
-        return (
-            format_duration(predicted, self._i18n.language)
-            if predicted is not None else self.t("history_none")
-        )
-
     def _refresh_queue_display(self) -> None:
+        rate = estimate_rate(self.ui.model_combo.currentText(), load_history(self._settings))
         selected = self.ui.file_list.currentItem()
         selected_source = selected.data(Qt.ItemDataRole.UserRole) if selected is not None else None
         tooltips = {
@@ -655,7 +638,7 @@ class MainWindow(QMainWindow):
         self.ui.file_list.blockSignals(True)
         self.ui.file_list.clear()
         for entry in self._queue.snapshot():
-            self.ui.file_list.addItem(self._queue_text(entry.source, entry.state))
+            self.ui.file_list.addItem(self._queue_text(entry.source, entry.state, rate))
             item = self.ui.file_list.item(self.ui.file_list.count() - 1)
             item.setData(Qt.ItemDataRole.UserRole, entry.source)
             item.setToolTip(tooltips.get(entry.source, ""))

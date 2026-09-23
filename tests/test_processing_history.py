@@ -1,14 +1,9 @@
-from pathlib import Path
-
 import pytest
-from PySide6.QtCore import QSettings
 
-from mp4totext.gui.processing_history import (
+from mp4totext.domain.processing_history import (
     ProcessingMetrics,
-    append_history,
     estimate_seconds,
-    format_duration,
-    load_history,
+    retain_history,
 )
 
 
@@ -23,18 +18,19 @@ def test_estimate_uses_model_specific_median_rate() -> None:
     assert estimate_seconds("medium", 2000, history) is None
 
 
-def test_history_round_trips_through_settings(tmp_path: Path) -> None:
-    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
-    sample = ProcessingMetrics("small", 2048, 12.5)
-
-    append_history(settings, sample)
-    settings.sync()
-
-    loaded = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
-    assert load_history(loaded) == (sample,)
+@pytest.mark.parametrize("elapsed", [0.0, -1.0, float("nan"), float("inf")])
+def test_invalid_samples_do_not_affect_estimates(elapsed: float) -> None:
+    valid = ProcessingMetrics("small", 1000, 10.0)
+    history = (valid, ProcessingMetrics("small", 1000, elapsed))
+    assert retain_history(history) == (valid,)
+    assert estimate_seconds("small", 2000, history) == pytest.approx(20.0)
+    assert estimate_seconds("small", 0, history) is None
 
 
-def test_format_duration() -> None:
-    assert format_duration(9.6) == "10秒"
-    assert format_duration(90) == "1分30秒"
-    assert format_duration(3661) == "1時間01分01秒"
+def test_retention_keeps_latest_twenty_per_model_in_original_order() -> None:
+    history = tuple(
+        ProcessingMetrics(model, 1000, float(index + 1))
+        for index in range(25)
+        for model in ("small", "tiny")
+    )
+    assert retain_history(history) == history[10:]

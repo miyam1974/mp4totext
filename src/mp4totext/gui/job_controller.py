@@ -9,9 +9,9 @@ from mp4totext.application import OutputFormat, transcribe_file
 from mp4totext.application.output_plan import OutputExistsError, output_paths_for
 from mp4totext.application.queue import QueueState, TranscriptionQueue
 from mp4totext.domain import ProgressEvent, TranscriptionOptions
+from mp4totext.domain.processing_history import ProcessingMetrics
 from mp4totext.engine import CancellationToken, TranscriptionCancelled
 from mp4totext.engine.faster_whisper import FasterWhisperTranscriber
-from mp4totext.gui.processing_history import ProcessingMetrics
 
 
 class TranscriptionWorker(QObject):

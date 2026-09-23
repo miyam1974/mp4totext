@@ -11,11 +11,12 @@ from pytestqt.qtbot import QtBot
 from mp4totext.application import OutputFormat, TranscriptionResult
 from mp4totext.application.queue import QueueState
 from mp4totext.domain import ProgressEvent, ProgressStage, TranscriptionOptions
+from mp4totext.domain.processing_history import ProcessingMetrics
 from mp4totext.engine.model_cache import ModelCacheStatus
 from mp4totext.gui import job_controller, main_window
+from mp4totext.gui.history_store import append_history, load_history
 from mp4totext.gui.job_controller import TranscriptionWorker
 from mp4totext.gui.main_window import MainWindow
-from mp4totext.gui.processing_history import ProcessingMetrics, append_history, load_history
 
 
 def test_window_accepts_a_selected_mp4(qtbot: QtBot) -> None:
@@ -656,3 +657,35 @@ def test_language_change_preserves_running_control_restrictions(qtbot: QtBot) ->
     window._set_running(False)
     assert window.ui.start_button.isEnabled()
     assert window.ui.output_edit.isEnabled()
+
+
+def test_queue_refresh_reads_history_once_and_each_source_size_once(
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = MainWindow()
+    qtbot.addWidget(window)
+    sources = (tmp_path / "first.mp4", tmp_path / "second.mp4")
+    for source in sources:
+        source.write_bytes(b"x" * 2000)
+    window._add_sources(sources)
+    history_reads: list[bool] = []
+    size_reads: list[Path] = []
+    original_stat = Path.stat
+
+    def history(settings: QSettings) -> tuple[ProcessingMetrics, ...]:
+        history_reads.append(True)
+        return (ProcessingMetrics("small", 1000, 10.0),)
+
+    def stat(path: Path, **kwargs: Any) -> os.stat_result:
+        if path in sources:
+            size_reads.append(path)
+        return original_stat(path, **kwargs)
+
+    monkeypatch.setattr(main_window, "load_history", history)
+    monkeypatch.setattr(Path, "stat", stat)
+    window._refresh_queue_display()
+    assert history_reads == [True]
+    assert size_reads == list(sources)
+    assert all(window.ui.file_list.item(i).text().endswith("予測: 20秒") for i in range(2))
+    window.ui.model_combo.setCurrentText("tiny")
+    assert all(window.ui.file_list.item(i).text().endswith("予測: 履歴なし") for i in range(2))

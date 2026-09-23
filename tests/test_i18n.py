@@ -4,8 +4,8 @@ import pytest
 from PySide6.QtCore import QCoreApplication
 from pytestqt.qtbot import QtBot
 
+from mp4totext.gui.formatters import format_duration
 from mp4totext.gui.i18n import _STRINGS, Language, set_qt_language
-from mp4totext.gui.processing_history import format_duration
 
 
 def test_translation_placeholders_match() -> None:
@@ -21,6 +21,12 @@ def test_translation_placeholders_match() -> None:
 @pytest.mark.parametrize("seconds, expected", [(9.6, "10s"), (90, "1m 30s"), (3661, "1h 01m 01s")])
 def test_english_duration(seconds: float, expected: str) -> None:
     assert format_duration(seconds, Language.EN) == expected
+
+
+def test_japanese_duration() -> None:
+    assert format_duration(9.6) == "10秒"
+    assert format_duration(90) == "1分30秒"
+    assert format_duration(3661) == "1時間01分01秒"
 
 
 def test_qt_standard_buttons_follow_language(qtbot: QtBot) -> None:
