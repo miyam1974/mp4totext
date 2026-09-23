@@ -7,6 +7,7 @@ from threading import Lock
 from PySide6.QtCore import QObject, Signal, Slot
 
 from mp4totext.application import OutputFormat, transcribe_file
+from mp4totext.application.output_plan import OutputExistsError, output_paths_for
 from mp4totext.domain import ProgressEvent, TranscriptionOptions
 from mp4totext.engine import CancellationToken, TranscriptionCancelled
 from mp4totext.engine.faster_whisper import FasterWhisperTranscriber
@@ -37,7 +38,7 @@ class TranscriptionWorker(QObject):
         self._output_dir = output_dir
         self._formats = formats
         self._options = options
-        self._overwrite = overwrite
+        self._overwrite_sources = frozenset(sources) if overwrite else frozenset()
         self._clock = clock
         self._cancellation = CancellationToken()
 
@@ -46,6 +47,7 @@ class TranscriptionWorker(QObject):
         completed = 0
         failed = 0
         started = 0
+        output_owners: dict[Path, Path] = {}
         transcriber = FasterWhisperTranscriber()
         try:
             while True:
@@ -60,13 +62,20 @@ class TranscriptionWorker(QObject):
                 started_at = self._clock()
                 self.file_started.emit(source, started, total, file_size)
                 try:
+                    for path in output_paths_for(source, self._formats, self._output_dir):
+                        key = path.resolve()
+                        if key in output_owners and output_owners[key] != source:
+                            raise OutputExistsError(
+                                f"Output path is shared by multiple videos: {path}"
+                            )
+                        output_owners[key] = source
                     result = transcribe_file(
                         source=source,
                         transcriber=transcriber,
                         formats=self._formats,
                         options=self._options,
                         output_dir=self._output_dir,
-                        overwrite=self._overwrite,
+                        overwrite=source in self._overwrite_sources,
                         progress=self._emit_progress,
                         cancellation=self._cancellation,
                     )

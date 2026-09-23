@@ -1,23 +1,13 @@
-import os
-import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass
-from enum import StrEnum
 from pathlib import Path
 
+from mp4totext.application.output_plan import OutputExistsError, OutputFormat, output_paths_for
 from mp4totext.domain import ProgressEvent, ProgressStage, TranscriptionOptions
 from mp4totext.engine import CancellationToken, Transcriber
 from mp4totext.engine.protocol import ProgressCallback
 from mp4totext.output import render_json, render_text
-
-
-class OutputFormat(StrEnum):
-    TXT = "txt"
-    JSON = "json"
-
-
-class OutputExistsError(FileExistsError):
-    """Raised when an output exists and overwrite is disabled."""
+from mp4totext.output.writer import write_outputs
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,9 +31,7 @@ def transcribe_file(
     if not selected_formats:
         raise ValueError("出力形式を1つ以上選択してください")
 
-    destination = output_dir or source.parent
-    destination.mkdir(parents=True, exist_ok=True)
-    output_paths = tuple(destination / f"{source.stem}.{item.value}" for item in selected_formats)
+    output_paths = output_paths_for(source, selected_formats, output_dir)
     existing = next((path for path in output_paths if path.exists()), None)
     if existing is not None and not overwrite:
         raise OutputExistsError(f"出力ファイルが既に存在します: {existing}")
@@ -61,25 +49,10 @@ def transcribe_file(
         OutputFormat.TXT: render_text,
         OutputFormat.JSON: render_json,
     }
-    temporary_paths: list[Path] = []
-    try:
-        for output_format, output_path in zip(selected_formats, output_paths, strict=True):
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                newline="\n",
-                prefix=f".{output_path.name}.",
-                suffix=".tmp",
-                dir=destination,
-                delete=False,
-            ) as temporary:
-                temporary.write(renderers[output_format](transcript))
-                temporary_paths.append(Path(temporary.name))
-        for temporary_path, output_path in zip(temporary_paths, output_paths, strict=True):
-            os.replace(temporary_path, output_path)
-    finally:
-        for temporary_path in temporary_paths:
-            temporary_path.unlink(missing_ok=True)
+    write_outputs({
+        path: renderers[output_format](transcript)
+        for output_format, path in zip(selected_formats, output_paths, strict=True)
+    })
 
     if progress is not None:
         progress(ProgressEvent(ProgressStage.COMPLETED, 1.0, "完了しました"))

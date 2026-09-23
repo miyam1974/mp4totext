@@ -106,3 +106,47 @@ def test_worker_reports_file_size_model_and_elapsed_time(
 
     assert started == [(source, 4096)]
     assert completed == [ProcessingMetrics("small", 4096, 12.5)]
+
+
+def test_added_files_do_not_inherit_overwrite_permission(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    first, added = tmp_path / "first.mp4", tmp_path / "added.mp4"
+    calls: list[tuple[Path, bool]] = []
+    monkeypatch.setattr(job_controller, "FasterWhisperTranscriber", object)
+
+    def transcribe(**kwargs: Any) -> TranscriptionResult:
+        source = kwargs["source"]
+        calls.append((source, kwargs["overwrite"]))
+        if source == first:
+            worker.add_pending((added,))
+        return TranscriptionResult((source.with_suffix(".txt"),), "ja", 1.0)
+
+    monkeypatch.setattr(job_controller, "transcribe_file", transcribe)
+    worker = job_controller.TranscriptionWorker(
+        (first,), None, (OutputFormat.TXT,), TranscriptionOptions(), True,
+    )
+    worker.run()
+    assert calls == [(first, True), (added, False)]
+
+
+def test_worker_rejects_collisions_even_when_overwrite_is_allowed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    sources = (tmp_path / "a" / "meeting.mp4", tmp_path / "b" / "meeting.mp4")
+    calls: list[Path] = []
+    failures: list[Path] = []
+    monkeypatch.setattr(job_controller, "FasterWhisperTranscriber", object)
+
+    def transcribe(**kwargs: Any) -> TranscriptionResult:
+        calls.append(kwargs["source"])
+        return TranscriptionResult((tmp_path / "meeting.txt",), "ja", 1.0)
+
+    monkeypatch.setattr(job_controller, "transcribe_file", transcribe)
+    worker = job_controller.TranscriptionWorker(
+        sources, tmp_path, (OutputFormat.TXT,), TranscriptionOptions(), True,
+    )
+    worker.file_failed.connect(lambda source, message: failures.append(source))
+    worker.run()
+    assert calls == [sources[0]]
+    assert failures == [sources[1]]

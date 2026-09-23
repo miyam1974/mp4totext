@@ -35,6 +35,11 @@ from PySide6.QtWidgets import (
 )
 
 from mp4totext.application import OutputFormat, TranscriptionResult
+from mp4totext.application.output_plan import (
+    find_output_collision,
+    output_directory,
+    output_paths_for,
+)
 from mp4totext.domain import ProgressEvent, ProgressStage, TranscriptionOptions
 from mp4totext.engine.model_cache import (
     delete_app_cache,
@@ -480,6 +485,15 @@ class MainWindow(QMainWindow):
             self._add_sources(tuple(Path(file_name) for file_name in file_names))
 
     def _add_sources(self, sources: tuple[Path, ...]) -> None:
+        if self._worker is not None:
+            collision = find_output_collision(
+                (*self._sources, *sources), self._selected_formats(), self._output_dir(),
+            )
+            if collision is not None:
+                QMessageBox.warning(
+                    self, self.t("destination_title"), self.t("output_collision", path=collision),
+                )
+                return
         added: list[Path] = []
         for source in sources:
             if source not in self._sources:
@@ -572,6 +586,11 @@ class MainWindow(QMainWindow):
         self._refresh_queue_display()
 
     def _open_output_dir(self) -> None:
+        if not self.output_edit.text().strip():
+            QMessageBox.warning(
+                self, self.t("destination_title"), self.t("destination_required"),
+            )
+            return
         directory = Path(self.output_edit.text().strip())
         if not directory.is_dir():
             QMessageBox.warning(
@@ -605,17 +624,17 @@ class MainWindow(QMainWindow):
             )
             return
 
-        output_dir = (
-            None
-            if self.same_folder_radio.isChecked()
-            else Path(self.output_edit.text())
-            if self.output_edit.text()
-            else None
-        )
+        output_dir = self._output_dir()
+        collision = find_output_collision(pending_sources, formats, output_dir)
+        if collision is not None:
+            QMessageBox.warning(
+                self, self.t("destination_title"), self.t("output_collision", path=collision),
+            )
+            return
         existing = [
-            (output_dir or source.parent) / f"{source.stem}.{item.value}"
+            path
             for source in pending_sources
-            for item in formats
+            for path in output_paths_for(source, formats, output_dir)
         ]
         overwrite = any(path.exists() for path in existing)
         if overwrite and QMessageBox.question(
@@ -921,12 +940,10 @@ class MainWindow(QMainWindow):
         formats = self._selected_formats()
         if not formats:
             return False
-        output_dir = (
-            source.parent
-            if self.same_folder_radio.isChecked()
-            else Path(self.output_edit.text().strip())
-        )
-        return all((output_dir / f"{source.stem}.{item.value}").is_file() for item in formats)
+        return all(path.is_file() for path in output_paths_for(source, formats, self._output_dir()))
+
+    def _output_dir(self) -> Path | None:
+        return output_directory(self.same_folder_radio.isChecked(), self.output_edit.text())
 
     def _saved_output_dir(self) -> str:
         saved = str(self._settings.value("output/directory", "", type=str))

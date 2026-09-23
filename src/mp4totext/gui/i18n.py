@@ -11,6 +11,20 @@ class Language(StrEnum):
 
 
 _STRINGS: dict[str, dict[Language, str]] = {
+    "output_collision": {
+        Language.JA: (
+            "複数の動画が同じ出力先になります。"
+            "動画名または保存先を変更してください。\n{path}"
+        ),
+        Language.EN: (
+            "Multiple videos have the same output path. "
+            "Rename a video or change the destination.\n{path}"
+        ),
+    },
+    "destination_required": {
+        Language.JA: "開くフォルダーを指定してください。",
+        Language.EN: "Specify a folder to open.",
+    },
     "error_details_hint": {
         Language.JA: "詳細はデバッグ欄を確認してください。",
         Language.EN: "See the Debug panel for details.",

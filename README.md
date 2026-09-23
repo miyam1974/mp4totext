@@ -38,6 +38,13 @@ Diagnostic details in the Debug panel retain the original error text.
 This setting changes the interface only; transcription still detects the spoken
 language automatically. The CLI's `--language` option specifies the audio language.
 
+An empty specified destination saves beside the video. If multiple videos map to
+the same output path, rename a video or change the destination. Files added during
+processing do not inherit overwrite permission. To overwrite their existing
+outputs, remove and re-add them after processing ends, then confirm at startup.
+If saving TXT and JSON fails partway through, already saved files are retained
+and their paths are reported in the Debug panel.
+
 To launch the portable build:
 
 ```powershell

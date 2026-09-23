@@ -537,3 +537,32 @@ def test_file_dialogs_use_translatable_qt_widgets(
     window._choose_output_dir()
     assert [title for title, _ in calls] == ["Select MP4", "Select destination"]
     assert all(options & QFileDialog.Option.DontUseNativeDialog for _, options in calls)
+
+
+def test_blank_destination_uses_source_folder_for_existing_output(
+    qtbot: QtBot, tmp_path: Path,
+) -> None:
+    source = tmp_path / "meeting.mp4"
+    source.with_suffix(".txt").write_text("existing", encoding="utf-8")
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.output_edit.setText("  ")
+    assert window._output_dir() is None
+    assert window._is_transcribed(source)
+
+
+def test_start_rejects_output_collision_before_creating_worker(
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.output_edit.setText(str(tmp_path))
+    window._add_sources((tmp_path / "a" / "meeting.mp4", tmp_path / "b" / "meeting.mp4"))
+    messages: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox, "warning", lambda parent, title, message: messages.append(message),
+    )
+    window._start()
+    assert len(messages) == 1
+    assert str(tmp_path / "meeting.txt") in messages[0]
+    assert window._worker is None
