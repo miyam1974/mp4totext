@@ -28,12 +28,12 @@ QPushButton, QLineEdit, QComboBox {
     padding: 0 10px;
 }
 QPushButton:hover { border-color: #276b49; }
-QPushButton#compactButton {
+QPushButton#compactButton, QPushButton#languageButton {
     min-height: 16px;
     font-size: 10px;
     padding: 0 6px;
 }
-QPushButton#compactButton:checkable:checked {
+QPushButton#languageButton:checked {
     background: #19633d;
     color: #ffffff;
     border-color: #19633d;
