@@ -44,7 +44,7 @@ To launch from the development environment:
 
 Drop multiple MP4 files onto the window, choose the output format(s) and destination folder, and start transcription. Files are processed in list order, and the current file name and status are shown.
 
-On first launch, the Windows app's default destination is the user's "Documents" folder. The destination you select or type is saved as a user setting and restored on the next launch. You can open the destination in Explorer with "Open destination" even before adding any video.
+You can choose the destination mode: "Same folder as the video" or "Specified folder." When "Specified folder" is selected, the default on first launch is the user's "Documents" folder. The chosen mode and destination are saved as user settings and restored on the next launch. You can open the destination in Explorer with "Open" even before adding any video (only while "Specified folder" is selected).
 
 When a video is added, if the expected output files for all currently selected formats (for example `meeting.txt` and `meeting.json`) already exist in the destination, the list marks it as "Transcribed." This is re-evaluated whenever the destination or output formats change.
 
@@ -54,7 +54,9 @@ Each file in the video list also shows an estimated time for the currently selec
 
 Estimates are rough approximations based on video file size. Actual processing time can differ due to video compression ratio, audio length, silence, and system load.
 
-You can select unprocessed files in the list and use "Remove," "Move up," and "Move down" to edit the pending queue. While transcription is running, pending files other than the one currently being processed remain editable. "Exit" closes the app only when nothing is being processed.
+You can select a file in the list and use "Remove" regardless of its status (pending, completed, or failed), except the one currently being processed. "Move up" and "Move down" reorder pending files only. "Open folder" opens the folder containing the selected file, for any file regardless of its status. While transcription is running, pending files other than the one currently being processed remain editable. "Exit" closes the app only when nothing is being processed.
+
+Each entry in the list shows the source file's size in MB.
 
 You can drop or add more MP4 files while transcription is running; they are appended to the pending queue and processed after the current batch.
 
@@ -81,7 +83,7 @@ The bottom of the window always shows the download status of the model currently
 
 "Delete app data" removes the app's dedicated cache under `%LOCALAPPDATA%\mp4totext\Cache`, including downloaded models. It does not delete the input MP4 files or the generated TXT/JSON files.
 
-The "Debug information" panel at the bottom of the window shows details of any errors from transcription or model operations. The panel scrolls vertically, and its text can be selected and copied. "Copy" copies all currently displayed debug information to the clipboard.
+The "Debug" panel at the bottom of the window shows details of any errors from transcription or model operations. It is about two lines tall and scrolls vertically; its text can be selected and copied with the keyboard (Ctrl+C).
 
 ### Model and software licenses
 

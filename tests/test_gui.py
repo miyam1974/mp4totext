@@ -3,8 +3,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QSettings, Qt
 from pytestqt.qtbot import QtBot
 
 from mp4totext.application import OutputFormat, TranscriptionResult
@@ -23,7 +22,7 @@ def test_window_accepts_a_selected_mp4(qtbot: QtBot) -> None:
     window._add_sources((Path("meeting.mp4"), Path("review.mp4")))
 
     assert window.start_button.isEnabled()
-    assert window.drop_area.label.text() == "2 ファイルを選択中"
+    assert window.status_label.text() == "2 ファイルを選択中"
     assert window.file_list.count() == 2
     assert window._selected_formats() == (OutputFormat.TXT,)
     assert window.file_list.item(0).text().endswith("/ 予測: 算出不可")
@@ -36,7 +35,7 @@ def test_sources_can_be_added_while_transcription_is_running(qtbot: QtBot) -> No
     window._set_running(True)
     cast(Any, window)._thread = object()
 
-    assert window.drop_area.isEnabled()
+    assert window.file_list.isEnabled()
 
     window._add_sources((Path("review.mp4"),))
 
@@ -64,8 +63,8 @@ def test_window_shows_active_file(qtbot: QtBot) -> None:
     window._on_file_started(source, 2, 2, 2048)
 
     assert window.file_list.currentRow() == 1
-    assert window.file_list.item(1).text() == "[処理中] review.mp4 / 予測: 算出不可"
-    assert window.active_file_label.text() == "処理中: review.mp4 (2/2)"
+    assert window.file_list.item(1).text() == "[処理中] review.mp4 (算出不可) / 予測: 算出不可"
+    assert window.active_file_label.text() == "review.mp4 (2/2)"
     assert window.timing_label.text().startswith("サイズ: 2.0 KiB / 予測: ")
     assert window.timing_label.text().endswith("/ 経過: 0秒")
 
@@ -82,16 +81,31 @@ def test_pending_files_can_be_reordered_and_removed(qtbot: QtBot) -> None:
     assert window._sources == [Path("first.mp4")]
 
 
-def test_processed_file_cannot_be_removed(qtbot: QtBot) -> None:
+def test_completed_or_failed_files_can_be_removed(qtbot: QtBot) -> None:
     window = MainWindow()
     qtbot.addWidget(window)
-    window._add_sources((Path("done.mp4"),))
+    window._add_sources((Path("done.mp4"), Path("failed.mp4")))
     window._states[0] = QueueState.COMPLETED
+    window._states[1] = QueueState.FAILED
+
+    window.file_list.setCurrentRow(0)
+    window._remove_selected()
+    window.file_list.setCurrentRow(0)
+    window._remove_selected()
+
+    assert window._sources == []
+
+
+def test_active_file_cannot_be_removed(qtbot: QtBot) -> None:
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._add_sources((Path("processing.mp4"),))
+    window._states[0] = QueueState.ACTIVE
     window.file_list.setCurrentRow(0)
 
     window._remove_selected()
 
-    assert window._sources == [Path("done.mp4")]
+    assert window._sources == [Path("processing.mp4")]
 
 
 def test_pending_file_can_be_removed_while_running(qtbot: QtBot) -> None:
@@ -151,12 +165,21 @@ def test_model_dropdown_shows_download_status(
     window = MainWindow()
     qtbot.addWidget(window)
 
-    assert window.model_status_label.text() == "モデル: small / ダウンロード済み (463.7 MiB)"
+    assert window.model_status_label.text() == "small / ダウンロード済み (463.7 MiB)"
     window.model_combo.setCurrentText("tiny")
-    assert window.model_status_label.text() == "モデル: tiny / 未ダウンロード"
+    assert window.model_status_label.text() == "tiny / 未ダウンロード"
 
 
-def test_debug_output_is_scrollable_and_copyable(qtbot: QtBot) -> None:
+def test_model_dropdown_shows_a_short_description(qtbot: QtBot) -> None:
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    assert window.model_description_label.text() == "既定値。速度と精度のバランスを優先"
+    window.model_combo.setCurrentText("tiny")
+    assert window.model_description_label.text() == "最も軽量・高速"
+
+
+def test_debug_output_is_scrollable_and_selectable(qtbot: QtBot) -> None:
     window = MainWindow()
     qtbot.addWidget(window)
     source = Path("failed.mp4")
@@ -164,11 +187,17 @@ def test_debug_output_is_scrollable_and_copyable(qtbot: QtBot) -> None:
     details = "Traceback\n" + "\n".join(f"line {index}" for index in range(50))
 
     window._on_file_failed(source, details)
-    window._copy_debug_info()
 
     assert "Traceback" in window.debug_output.toPlainText()
     assert window.debug_output.verticalScrollBar().maximum() > 0
-    assert QApplication.clipboard().text() == window.debug_output.toPlainText()
+    assert window.debug_output.textInteractionFlags() & Qt.TextInteractionFlag.TextSelectableByMouse
+
+
+def test_debug_output_is_always_visible(qtbot: QtBot) -> None:
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    assert not window.debug_output.isHidden()
 
 
 def test_model_download_updates_status_and_keeps_cancel_enabled(
@@ -189,14 +218,14 @@ def test_model_download_updates_status_and_keeps_cancel_enabled(
         ProgressEvent(ProgressStage.DOWNLOADING_MODEL, 0.4, "Downloading bytes")
     )
 
-    assert window.model_status_label.text() == "モデル: small / ダウンロード中 (40%)"
+    assert window.model_status_label.text() == "small / ダウンロード中 (40%)"
     assert window.cancel_button.isEnabled()
     assert window.cancel_button.text() == "モデル取得をキャンセル"
 
     downloaded = True
     window._on_progress(ProgressEvent(ProgressStage.TRANSCRIBING, 0.0, "文字起こし中"))
 
-    assert window.model_status_label.text() == "モデル: small / ダウンロード済み (1.0 KiB)"
+    assert window.model_status_label.text() == "small / ダウンロード済み (1.0 KiB)"
     assert window.cancel_button.text() == "キャンセル"
 
 
@@ -219,7 +248,7 @@ def test_window_uses_requested_initial_height(qtbot: QtBot) -> None:
     window = MainWindow()
     qtbot.addWidget(window)
 
-    assert window.height() == 604
+    assert window.height() == 560
 
 
 def test_open_output_directory_uses_selected_destination(
@@ -234,6 +263,26 @@ def test_open_output_directory_uses_selected_destination(
     window.output_edit.setText(str(tmp_path))
 
     window._open_output_dir()
+
+    assert opened == [tmp_path.resolve()]
+
+
+def test_open_source_folder_opens_the_selected_videos_directory(
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    opened: list[Path] = []
+    monkeypatch.setattr(os, "startfile", lambda path: opened.append(Path(path)))
+    source = tmp_path / "meeting.mp4"
+    source.touch()
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._add_sources((source,))
+    window.file_list.setCurrentRow(0)
+
+    assert window.open_source_folder_button.isEnabled()
+    window._open_source_folder()
 
     assert opened == [tmp_path.resolve()]
 
@@ -256,6 +305,46 @@ def test_output_directory_persists_across_windows(
     qtbot.addWidget(second_window)
 
     assert second_window.output_edit.text() == str(output_dir)
+
+
+def test_output_mode_toggle_enables_correct_controls_and_persists(
+    qtbot: QtBot,
+    tmp_path: Path,
+) -> None:
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    window = MainWindow(settings)
+    qtbot.addWidget(window)
+
+    assert window.custom_folder_radio.isChecked()
+    assert window.output_edit.isEnabled()
+    assert window.output_browse_button.isEnabled()
+    assert window.open_output_button.isEnabled()
+
+    window.same_folder_radio.setChecked(True)
+
+    assert not window.output_edit.isEnabled()
+    assert not window.output_browse_button.isEnabled()
+    assert not window.open_output_button.isEnabled()
+    assert settings.value("output/same_folder", type=bool) is True
+
+
+def test_same_folder_mode_uses_the_videos_own_directory(
+    qtbot: QtBot,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "meeting.mp4"
+    source.touch()
+    (tmp_path / "meeting.txt").write_text("transcript", encoding="utf-8")
+    window = MainWindow(
+        QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    )
+    qtbot.addWidget(window)
+    window.output_edit.setText(str(tmp_path / "elsewhere"))
+    window.same_folder_radio.setChecked(True)
+
+    window._add_sources((source,))
+
+    assert window.file_list.item(0).text().startswith("[待機 / 文字起こし済み]")
 
 
 def test_saved_output_directory_can_open_before_adding_video(
@@ -291,16 +380,16 @@ def test_queue_marks_video_when_all_selected_outputs_exist(
     window._add_sources((source,))
 
     assert window.file_list.item(0).text() == (
-        "[待機 / 文字起こし済み] meeting.mp4 / 予測: 履歴なし"
+        "[待機 / 文字起こし済み] meeting.mp4 (0.0 MB) / 予測: 履歴なし"
     )
 
     window.json_check.setChecked(True)
-    assert window.file_list.item(0).text() == "[待機] meeting.mp4 / 予測: 履歴なし"
+    assert window.file_list.item(0).text() == "[待機] meeting.mp4 (0.0 MB) / 予測: 履歴なし"
 
     (tmp_path / "meeting.json").write_text("{}", encoding="utf-8")
     window._refresh_queue_display()
     assert window.file_list.item(0).text() == (
-        "[待機 / 文字起こし済み] meeting.mp4 / 予測: 履歴なし"
+        "[待機 / 文字起こし済み] meeting.mp4 (0.0 MB) / 予測: 履歴なし"
     )
 
 
