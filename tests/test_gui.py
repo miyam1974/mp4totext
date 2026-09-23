@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from threading import Event
 from typing import Any, cast
 
 import pytest
@@ -8,11 +9,12 @@ from PySide6.QtWidgets import QFileDialog, QMessageBox
 from pytestqt.qtbot import QtBot
 
 from mp4totext.application import OutputFormat, TranscriptionResult
+from mp4totext.application.queue import QueueState
 from mp4totext.domain import ProgressEvent, ProgressStage, TranscriptionOptions
 from mp4totext.engine.model_cache import ModelCacheStatus
-from mp4totext.gui import main_window
+from mp4totext.gui import job_controller, main_window
 from mp4totext.gui.job_controller import TranscriptionWorker
-from mp4totext.gui.main_window import MainWindow, QueueState
+from mp4totext.gui.main_window import MainWindow
 from mp4totext.gui.processing_history import ProcessingMetrics, append_history, load_history
 
 
@@ -86,8 +88,8 @@ def test_completed_or_failed_files_can_be_removed(qtbot: QtBot) -> None:
     window = MainWindow()
     qtbot.addWidget(window)
     window._add_sources((Path("done.mp4"), Path("failed.mp4")))
-    window._states[0] = QueueState.COMPLETED
-    window._states[1] = QueueState.FAILED
+    window._queue.set_state(window._sources[0], QueueState.COMPLETED)
+    window._queue.set_state(window._sources[1], QueueState.FAILED)
 
     window.file_list.setCurrentRow(0)
     window._remove_selected()
@@ -101,7 +103,7 @@ def test_active_file_cannot_be_removed(qtbot: QtBot) -> None:
     window = MainWindow()
     qtbot.addWidget(window)
     window._add_sources((Path("processing.mp4"),))
-    window._states[0] = QueueState.ACTIVE
+    window._queue.set_state(window._sources[0], QueueState.ACTIVE)
     window.file_list.setCurrentRow(0)
 
     window._remove_selected()
@@ -121,6 +123,7 @@ def test_pending_file_can_be_removed_while_running(qtbot: QtBot) -> None:
         (OutputFormat.TXT,),
         TranscriptionOptions(),
         False,
+        queue=window._queue,
     )
     window.file_list.setCurrentRow(1)
 
@@ -142,11 +145,12 @@ def test_file_added_while_running_is_registered_with_the_worker(qtbot: QtBot) ->
         (OutputFormat.TXT,),
         TranscriptionOptions(),
         False,
+        queue=window._queue,
     )
 
     window._add_sources((Path("added_mid_run.mp4"),))
 
-    assert cast(Any, window._worker)._pending == [Path("added_mid_run.mp4")]
+    assert window._worker.queue.pending() == (Path("added_mid_run.mp4"),)
 
     window.file_list.setCurrentRow(1)
     window._remove_selected()
@@ -566,3 +570,69 @@ def test_start_rejects_output_collision_before_creating_worker(
     assert len(messages) == 1
     assert str(tmp_path / "meeting.txt") in messages[0]
     assert window._worker is None
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_late_addition_at_worker_shutdown_is_not_lost(
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancel: bool,
+) -> None:
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.output_edit.setText(str(tmp_path))
+    first, late = tmp_path / "first.mp4", tmp_path / "late.mp4"
+    window._add_sources((first,))
+    empty_seen, release = Event(), Event()
+    claim = window._queue.claim_next
+    calls: list[Path] = []
+    notifications: list[str] = []
+
+    def pause_after_empty() -> Path | None:
+        source = claim()
+        if source is None and not empty_seen.is_set():
+            empty_seen.set()
+            assert release.wait(5), "GUI did not release worker"
+        return source
+
+    def transcribe(**kwargs: Any) -> TranscriptionResult:
+        calls.append(kwargs["source"])
+        return TranscriptionResult((kwargs["source"].with_suffix(".txt"),), "ja", 1.0)
+
+    monkeypatch.setattr(window._queue, "claim_next", pause_after_empty)
+    monkeypatch.setattr(job_controller, "FasterWhisperTranscriber", object)
+    monkeypatch.setattr(job_controller, "transcribe_file", transcribe)
+    monkeypatch.setattr(
+        QMessageBox, "information", lambda parent, title, text: notifications.append(text),
+    )
+    try:
+        window._start()
+        qtbot.waitUntil(empty_seen.is_set)
+        window._add_sources((late,))
+        if cancel:
+            window._cancel()
+        release.set()
+        qtbot.waitUntil(lambda: window._thread is None, timeout=5000)
+        assert calls == ([first] if cancel else [first, late])
+        assert window._pending_sources() == ((late,) if cancel else ())
+        assert len(notifications) == (0 if cancel else 1)
+        if cancel:
+            assert window.status_label.text() == "キャンセルしました"
+        if not cancel:
+            assert window._batch_counts == (2, 0)
+    finally:
+        release.set()
+        if window._thread is not None:
+            window._cancel()
+            qtbot.waitUntil(lambda: window._thread is None, timeout=5000)
+
+
+def test_reorder_rejected_after_worker_claim_keeps_display_order(qtbot: QtBot) -> None:
+    window = MainWindow()
+    qtbot.addWidget(window)
+    first, second = Path("first.mp4"), Path("second.mp4")
+    window._add_sources((first, second))
+    window.file_list.setCurrentRow(1)
+    assert window._queue.claim_next() == first
+    window._move_selected(-1)
+    assert window._sources == [first, second]
+    assert "first.mp4" in window.file_list.item(0).text()
+    assert window._queue.claim_next() == second

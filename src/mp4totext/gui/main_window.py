@@ -2,7 +2,6 @@ import os
 import time
 import traceback
 from collections.abc import Callable
-from enum import StrEnum
 from pathlib import Path
 
 from PySide6.QtCore import QRect, QSettings, QSize, QStandardPaths, Qt, QThread, QTimer, Signal
@@ -40,6 +39,7 @@ from mp4totext.application.output_plan import (
     output_directory,
     output_paths_for,
 )
+from mp4totext.application.queue import QueueState, TranscriptionQueue
 from mp4totext.domain import ProgressEvent, ProgressStage, TranscriptionOptions
 from mp4totext.engine.model_cache import (
     delete_app_cache,
@@ -56,14 +56,6 @@ from mp4totext.gui.processing_history import (
     format_duration,
     load_history,
 )
-
-
-class QueueState(StrEnum):
-    PENDING = "pending"
-    ACTIVE = "active"
-    COMPLETED = "completed"
-    FAILED = "failed"
-
 
 _QUEUE_STATE_KEYS = {
     QueueState.PENDING: "queue_pending",
@@ -200,8 +192,12 @@ class MainWindow(QMainWindow):
         self._elapsed_timer.timeout.connect(self._update_elapsed_time)
         self.setMinimumSize(680, 460)
         self.resize(720, 560)
-        self._sources: list[Path] = []
-        self._states: list[QueueState] = []
+        self._queue = TranscriptionQueue()
+        self._cancel_requested = False
+        self._batch_counts = (0, 0)
+        self._run_settings: (
+            tuple[Path | None, tuple[OutputFormat, ...], TranscriptionOptions] | None
+        ) = None
         self._thread: QThread | None = None
         self._worker: TranscriptionWorker | None = None
         self._model_refresh_pending = False
@@ -209,6 +205,14 @@ class MainWindow(QMainWindow):
 
     def t(self, key: str, **kwargs: object) -> str:
         return self._i18n.t(key, **kwargs)
+
+    @property
+    def _sources(self) -> list[Path]:
+        return [item.source for item in self._queue.snapshot()]
+
+    @property
+    def _states(self) -> list[QueueState]:
+        return [item.state for item in self._queue.snapshot()]
 
     def _tr(self, setter: Callable[[str], None], key: str, **kwargs: object) -> None:
         def update() -> None:
@@ -494,17 +498,10 @@ class MainWindow(QMainWindow):
                     self, self.t("destination_title"), self.t("output_collision", path=collision),
                 )
                 return
-        added: list[Path] = []
-        for source in sources:
-            if source not in self._sources:
-                self._sources.append(source)
-                self._states.append(QueueState.PENDING)
-                self.file_list.addItem(self._queue_text(source, QueueState.PENDING))
-                added.append(source)
-        if added and self._worker is not None:
-            self._worker.add_pending(tuple(added))
+        self._queue.add(sources)
+        self._refresh_queue_display()
         self._set_status("files_selected", count=len(self._sources))
-        self.start_button.setEnabled(self._thread is None and bool(self._sources))
+        self.start_button.setEnabled(self._thread is None and self._has_pending())
         self._update_queue_buttons()
 
     def _remove_selected(self) -> None:
@@ -512,15 +509,10 @@ class MainWindow(QMainWindow):
         if not self._is_removable(row):
             return
         source = self._sources[row]
-        if (
-            self._states[row] is QueueState.PENDING
-            and self._worker is not None
-            and not self._worker.remove_pending(source)
-        ):
+        if not self._queue.remove(source):
+            self._refresh_queue_display()
             return
-        self.file_list.takeItem(row)
-        self._sources.pop(row)
-        self._states.pop(row)
+        self._refresh_queue_display()
         self._set_status("files_selected", count=len(self._sources))
         self.start_button.setEnabled(self._thread is None and self._has_pending())
         self._update_queue_buttons()
@@ -530,19 +522,8 @@ class MainWindow(QMainWindow):
         destination = row + offset
         if not self._is_pending(row) or not self._is_pending(destination):
             return
-        self._sources[row], self._sources[destination] = (
-            self._sources[destination],
-            self._sources[row],
-        )
-        self._states[row], self._states[destination] = (
-            self._states[destination],
-            self._states[row],
-        )
-        item = self.file_list.takeItem(row)
-        self.file_list.insertItem(destination, item)
-        self.file_list.setCurrentRow(destination)
-        if self._worker is not None:
-            self._worker.reorder_pending(self._pending_sources())
+        self._queue.move(self._sources[row], offset)
+        self._refresh_queue_display()
 
     def _update_queue_buttons(self) -> None:
         row = self.file_list.currentRow()
@@ -644,14 +625,25 @@ class MainWindow(QMainWindow):
         ) != QMessageBox.StandardButton.Yes:
             return
 
+        self._cancel_requested = False
+        self._batch_counts = (0, 0)
+        self._run_settings = (
+            output_dir, formats, TranscriptionOptions(model_name=self.model_combo.currentText()),
+        )
+        self._launch_worker(pending_sources, overwrite)
+
+    def _launch_worker(self, sources: tuple[Path, ...], overwrite: bool) -> None:
+        assert self._run_settings is not None
+        output_dir, formats, options = self._run_settings
         self._set_running(True)
         self._thread = QThread(self)
         self._worker = TranscriptionWorker(
-            pending_sources,
+            sources,
             output_dir,
             formats,
-            TranscriptionOptions(model_name=self.model_combo.currentText()),
+            options,
             overwrite,
+            queue=self._queue,
         )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
@@ -661,6 +653,7 @@ class MainWindow(QMainWindow):
         self._worker.file_failed.connect(self._on_file_failed)
         self._worker.batch_completed.connect(self._on_batch_completed)
         self._worker.cancelled.connect(self._on_cancelled)
+        self._worker.fatal_error.connect(self._on_worker_error)
         self._worker.finished.connect(self._thread.quit)
         self._worker.finished.connect(self._worker.deleteLater)
         self._thread.finished.connect(self._job_finished)
@@ -687,10 +680,13 @@ class MainWindow(QMainWindow):
         self._update_queue_buttons()
 
     def _on_file_started(self, source: Path, index: int, total: int, file_size: int) -> None:
+        if source not in self._sources:
+            return
         row = self._sources.index(source)
-        self._states[row] = QueueState.ACTIVE
+        if self._worker is None:
+            self._queue.set_state(source, QueueState.ACTIVE)
+        self._refresh_queue_display()
         self.file_list.setCurrentRow(row)
-        self.file_list.item(row).setText(self._queue_text(source, QueueState.ACTIVE))
         self._set_active_file("active_file_progress", name=source.name, index=index, total=total)
         self._active_file_size = file_size
         self._estimated_seconds = estimate_seconds(
@@ -734,21 +730,31 @@ class MainWindow(QMainWindow):
         if metrics.file_size_bytes > 0 and metrics.elapsed_seconds > 0:
             append_history(self._settings, metrics)
             self._settings.sync()
+        if source not in self._sources:
+            return
         row = self._sources.index(source)
-        self._states[row] = QueueState.COMPLETED
-        self.file_list.item(row).setText(self._queue_text(source, QueueState.COMPLETED))
+        if self._worker is None:
+            self._queue.set_state(source, QueueState.COMPLETED)
         self.file_list.item(row).setToolTip("\n".join(str(path) for path in result.output_paths))
         self._refresh_queue_display()
 
     def _on_file_failed(self, source: Path, message: str) -> None:
         self._finish_timing()
-        row = self._sources.index(source)
-        self._states[row] = QueueState.FAILED
-        self.file_list.item(row).setText(self._queue_text(source, QueueState.FAILED))
-        self.file_list.item(row).setToolTip(message)
         self._append_debug(f"{source}\n{message}")
+        if source not in self._sources:
+            return
+        row = self._sources.index(source)
+        if self._worker is None:
+            self._queue.set_state(source, QueueState.FAILED)
+        self.file_list.item(row).setToolTip(message)
+        self._refresh_queue_display()
 
     def _on_batch_completed(self, completed: int, failed: int) -> None:
+        previous_completed, previous_failed = self._batch_counts
+        self._batch_counts = (previous_completed + completed, previous_failed + failed)
+
+    def _show_batch_completed(self) -> None:
+        completed, failed = self._batch_counts
         self._set_active_file("none")
         self._set_status("batch_completed_status", completed=completed, failed=failed)
         QMessageBox.information(
@@ -758,27 +764,47 @@ class MainWindow(QMainWindow):
         )
 
     def _on_cancelled(self) -> None:
+        self._cancel_requested = True
         self._finish_timing()
         self._model_refresh_pending = False
         self._set_status("cancelled_status")
         self._set_active_file("none")
-        for row, state in enumerate(self._states):
-            if state is QueueState.ACTIVE:
-                self._states[row] = QueueState.PENDING
+        for item in self._queue.snapshot():
+            if item.state is QueueState.ACTIVE:
+                self._queue.set_state(item.source, QueueState.PENDING)
         self._refresh_queue_display()
 
     def _cancel(self) -> None:
         if self._worker is not None:
+            self._cancel_requested = True
             self._set_status("cancelling_status")
             self.cancel_button.setEnabled(False)
             self._worker.cancel()
+
+    def _on_worker_error(self, message: str) -> None:
+        self._on_cancelled()
+        self._set_status("queue_failed")
+        self._append_debug(message)
 
     def _job_finished(self) -> None:
         self._thread = None
         self._worker = None
         self._model_refresh_pending = False
+        self._refresh_queue_display()
+        if (
+            self._cancel_requested
+            and self._status_state is not None
+            and self._status_state[0] == "cancelling_status"
+        ):
+            self._on_cancelled()
+        if self._run_settings is not None and not self._cancel_requested and self._has_pending():
+            self._launch_worker(self._pending_sources(), False)
+            return
         self._set_running(False)
         self._update_model_status()
+        if self._run_settings is not None and not self._cancel_requested:
+            self._show_batch_completed()
+        self._run_settings = None
 
     def _update_elapsed_time(self) -> None:
         if self._timing_started_at is None and self._finished_elapsed is None:
@@ -879,11 +905,7 @@ class MainWindow(QMainWindow):
         return QueueState.PENDING in self._states
 
     def _pending_sources(self) -> tuple[Path, ...]:
-        return tuple(
-            source
-            for source, state in zip(self._sources, self._states, strict=True)
-            if state is QueueState.PENDING
-        )
+        return self._queue.pending()
 
     def _is_pending(self, row: int) -> bool:
         return 0 <= row < len(self._states) and self._states[row] is QueueState.PENDING
@@ -931,10 +953,25 @@ class MainWindow(QMainWindow):
         )
 
     def _refresh_queue_display(self) -> None:
-        for row, (source, state) in enumerate(
-            zip(self._sources, self._states, strict=True)
-        ):
-            self.file_list.item(row).setText(self._queue_text(source, state))
+        selected = self.file_list.currentItem()
+        selected_source = selected.data(Qt.ItemDataRole.UserRole) if selected is not None else None
+        tooltips = {
+            item.data(Qt.ItemDataRole.UserRole): item.toolTip()
+            for row in range(self.file_list.count())
+            if (item := self.file_list.item(row)) is not None
+        }
+        self.file_list.blockSignals(True)
+        self.file_list.clear()
+        for entry in self._queue.snapshot():
+            self.file_list.addItem(self._queue_text(entry.source, entry.state))
+            item = self.file_list.item(self.file_list.count() - 1)
+            item.setData(Qt.ItemDataRole.UserRole, entry.source)
+            item.setToolTip(tooltips.get(entry.source, ""))
+            if entry.source == selected_source:
+                self.file_list.setCurrentItem(item)
+        self.file_list.blockSignals(False)
+        if hasattr(self, "remove_button"):
+            self._update_queue_buttons()
 
     def _is_transcribed(self, source: Path) -> bool:
         formats = self._selected_formats()

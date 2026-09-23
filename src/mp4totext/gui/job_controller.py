@@ -2,12 +2,12 @@ import time
 import traceback
 from collections.abc import Callable
 from pathlib import Path
-from threading import Lock
 
 from PySide6.QtCore import QObject, Signal, Slot
 
 from mp4totext.application import OutputFormat, transcribe_file
 from mp4totext.application.output_plan import OutputExistsError, output_paths_for
+from mp4totext.application.queue import QueueState, TranscriptionQueue
 from mp4totext.domain import ProgressEvent, TranscriptionOptions
 from mp4totext.engine import CancellationToken, TranscriptionCancelled
 from mp4totext.engine.faster_whisper import FasterWhisperTranscriber
@@ -21,6 +21,7 @@ class TranscriptionWorker(QObject):
     file_failed = Signal(object, str)
     batch_completed = Signal(int, int)
     cancelled = Signal()
+    fatal_error = Signal(str)
     finished = Signal()
 
     def __init__(
@@ -31,10 +32,10 @@ class TranscriptionWorker(QObject):
         options: TranscriptionOptions,
         overwrite: bool,
         clock: Callable[[], float] = time.monotonic,
+        queue: TranscriptionQueue | None = None,
     ) -> None:
         super().__init__()
-        self._pending = list(sources)
-        self._pending_lock = Lock()
+        self.queue = queue if queue is not None else TranscriptionQueue(sources)
         self._output_dir = output_dir
         self._formats = formats
         self._options = options
@@ -48,20 +49,21 @@ class TranscriptionWorker(QObject):
         failed = 0
         started = 0
         output_owners: dict[Path, Path] = {}
-        transcriber = FasterWhisperTranscriber()
+        source: Path | None = None
         try:
+            transcriber = FasterWhisperTranscriber()
             while True:
-                with self._pending_lock:
-                    if not self._pending:
-                        break
-                    source = self._pending.pop(0)
-                    total = started + 1 + len(self._pending)
-                started += 1
                 self._cancellation.raise_if_cancelled()
-                file_size = source.stat().st_size if source.is_file() else 0
-                started_at = self._clock()
-                self.file_started.emit(source, started, total, file_size)
+                source = self.queue.claim_next()
+                if source is None:
+                    break
+                started += 1
                 try:
+                    file_size = source.stat().st_size if source.is_file() else 0
+                    started_at = self._clock()
+                    self.file_started.emit(
+                        source, started, started + len(self.queue.pending()), file_size,
+                    )
                     for path in output_paths_for(source, self._formats, self._output_dir):
                         key = path.resolve()
                         if key in output_owners and output_owners[key] != source:
@@ -83,9 +85,11 @@ class TranscriptionWorker(QObject):
                     raise
                 except Exception:
                     failed += 1
+                    self.queue.set_state(source, QueueState.FAILED)
                     self.file_failed.emit(source, traceback.format_exc())
                     continue
                 completed += 1
+                self.queue.set_state(source, QueueState.COMPLETED)
                 metrics = ProcessingMetrics(
                     model_name=self._options.model_name,
                     file_size_bytes=file_size,
@@ -94,7 +98,14 @@ class TranscriptionWorker(QObject):
                 self.file_completed.emit(source, result, metrics)
             self.batch_completed.emit(completed, failed)
         except TranscriptionCancelled:
+            if source is not None:
+                # Only an interrupted active file returns to pending.
+                for item in self.queue.snapshot():
+                    if item.source == source and item.state is QueueState.ACTIVE:
+                        self.queue.set_state(source, QueueState.PENDING)
             self.cancelled.emit()
+        except Exception:
+            self.fatal_error.emit(traceback.format_exc())
         finally:
             self.finished.emit()
 
@@ -102,20 +113,13 @@ class TranscriptionWorker(QObject):
         self._cancellation.cancel()
 
     def remove_pending(self, source: Path) -> bool:
-        with self._pending_lock:
-            if source not in self._pending:
-                return False
-            self._pending.remove(source)
-            return True
+        return self.queue.remove(source, pending_only=True)
 
     def add_pending(self, sources: tuple[Path, ...]) -> None:
-        with self._pending_lock:
-            self._pending.extend(source for source in sources if source not in self._pending)
+        self.queue.add(sources)
 
-    def reorder_pending(self, sources: tuple[Path, ...]) -> None:
-        with self._pending_lock:
-            if set(sources) == set(self._pending):
-                self._pending[:] = sources
+    def reorder_pending(self, sources: tuple[Path, ...]) -> bool:
+        return self.queue.reorder_pending(sources)
 
     def _emit_progress(self, event: ProgressEvent) -> None:
         self.progress.emit(event)
