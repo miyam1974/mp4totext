@@ -30,6 +30,14 @@ By default, a TXT file is written to the same folder as the input MP4. JSON outp
 
 ## Windows app
 
+Use **EN / JP** at the top right to switch the interface language at any time.
+Japanese is the default; your choice is saved for the next launch. Labels, time
+estimates, progress, and standard dialogs follow the selected language. File
+selection uses Qt dialogs so their language also follows this setting.
+Diagnostic details in the Debug panel retain the original error text.
+This setting changes the interface only; transcription still detects the spoken
+language automatically. The CLI's `--language` option specifies the audio language.
+
 To launch the portable build:
 
 ```powershell

@@ -4,6 +4,7 @@ from typing import Any, cast
 
 import pytest
 from PySide6.QtCore import QSettings, Qt
+from PySide6.QtWidgets import QFileDialog, QMessageBox
 from pytestqt.qtbot import QtBot
 
 from mp4totext.application import OutputFormat, TranscriptionResult
@@ -251,6 +252,57 @@ def test_window_uses_requested_initial_height(qtbot: QtBot) -> None:
     assert window.height() == 560
 
 
+def test_language_toggle_switches_ui_text_and_persists(
+    qtbot: QtBot,
+    tmp_path: Path,
+) -> None:
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    window = MainWindow(settings)
+    qtbot.addWidget(window)
+    window._add_sources((Path("meeting.mp4"),))
+
+    assert window.lang_ja_button.isChecked()
+    assert window.add_files_button.text() == "MP4を追加"
+    assert window.file_list.item(0).text().startswith("[待機]")
+
+    window.lang_en_button.setChecked(True)
+
+    assert window.add_files_button.text() == "Add MP4"
+    assert window.remove_button.text() == "Remove"
+    assert window.same_folder_radio.text() == "Same folder as video"
+    assert window.file_list.item(0).text().startswith("[Pending]")
+    assert settings.value("app/language", type=str) == "en"
+
+    second_window = MainWindow(settings)
+    qtbot.addWidget(second_window)
+
+    assert second_window.lang_en_button.isChecked()
+    assert second_window.add_files_button.text() == "Add MP4"
+
+
+def test_language_toggle_updates_dynamic_status_text(qtbot: QtBot) -> None:
+    window = MainWindow()
+    qtbot.addWidget(window)
+    source = Path("meeting.mp4")
+    window._add_sources((source,))
+    window._on_file_started(source, 1, 1, 0)
+
+    window._on_progress(ProgressEvent(ProgressStage.TRANSCRIBING, 0.2, "文字起こし中"))
+    assert window.status_label.text() == "文字起こし中"
+
+    window.lang_en_button.setChecked(True)
+
+    assert window.active_file_label.text() == "meeting.mp4 (1/1)"
+    assert window.timing_label.text().startswith("Size: ")
+    assert window.status_label.text() == "Transcribing"
+    assert window.timing_label.text().endswith("Elapsed: 0s")
+
+    window.lang_ja_button.setChecked(True)
+    assert window.status_label.text() == "文字起こし中"
+    assert window.add_files_button.text() == "MP4を追加"
+    assert window._settings.value("app/language") == "ja"
+
+
 def test_open_output_directory_uses_selected_destination(
     qtbot: QtBot,
     monkeypatch: pytest.MonkeyPatch,
@@ -418,3 +470,70 @@ def test_timing_uses_model_history_and_records_success(
 
     assert window.timing_label.text() == "サイズ: 2.0 KiB / 予測: 20秒 / 経過: 25秒"
     assert load_history(settings)[-1] == metrics
+
+    window.lang_en_button.setChecked(True)
+    assert window.timing_label.text() == "Size: 2.0 KiB / Est: 20s / Elapsed: 25s"
+    assert "Est: " in window.file_list.item(0).text()
+    assert "秒" not in window.file_list.item(0).text()
+    window.lang_ja_button.setChecked(True)
+    assert window.timing_label.text() == "サイズ: 2.0 KiB / 予測: 20秒 / 経過: 25秒"
+
+
+@pytest.mark.parametrize("fraction", [None, 0.4])
+def test_language_switch_preserves_download_progress(qtbot: QtBot, fraction: float | None) -> None:
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._on_progress(ProgressEvent(ProgressStage.DOWNLOADING_MODEL, fraction, "download"))
+    japanese = window.model_status_label.text()
+    window.lang_en_button.setChecked(True)
+    state = "Preparing" if fraction is None else "Downloading (40%)"
+    assert window.model_status_label.text() == f"small / {state}"
+    assert window.cancel_button.text() == "Cancel model download"
+    window.lang_ja_button.setChecked(True)
+    assert window.model_status_label.text() == japanese
+
+
+def test_error_dialog_is_localized_and_debug_keeps_original(
+    qtbot: QtBot, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.lang_en_button.setChecked(True)
+    window.output_edit.setText(str(tmp_path))
+    messages: list[str] = []
+
+    def fail_open(path: Path) -> None:
+        raise OSError("アクセス拒否")
+
+    monkeypatch.setattr(os, "startfile", fail_open)
+    monkeypatch.setattr(
+        QMessageBox, "critical",
+        lambda parent, title, message: messages.append(message),
+    )
+    window._open_output_dir()
+    assert messages == ["Could not open the destination\nSee the Debug panel for details."]
+    assert "アクセス拒否" in window.debug_output.toPlainText()
+
+
+def test_file_dialogs_use_translatable_qt_widgets(
+    qtbot: QtBot, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.lang_en_button.setChecked(True)
+    calls: list[tuple[str, Any]] = []
+
+    def files(parent: object, title: str, *args: Any, **kwargs: Any) -> tuple[list[str], str]:
+        calls.append((title, kwargs["options"]))
+        return [], ""
+
+    def directory(parent: object, title: str, **kwargs: Any) -> str:
+        calls.append((title, kwargs["options"]))
+        return ""
+
+    monkeypatch.setattr(QFileDialog, "getOpenFileNames", files)
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", directory)
+    window._choose_source()
+    window._choose_output_dir()
+    assert [title for title, _ in calls] == ["Select MP4", "Select destination"]
+    assert all(options & QFileDialog.Option.DontUseNativeDialog for _, options in calls)

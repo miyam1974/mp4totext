@@ -42,6 +42,7 @@ from mp4totext.engine.model_cache import (
     format_size,
     inspect_model_cache,
 )
+from mp4totext.gui.i18n import Language, Translator, set_qt_language
 from mp4totext.gui.job_controller import TranscriptionWorker
 from mp4totext.gui.processing_history import (
     ProcessingMetrics,
@@ -53,35 +54,43 @@ from mp4totext.gui.processing_history import (
 
 
 class QueueState(StrEnum):
-    PENDING = "待機"
-    ACTIVE = "処理中"
-    COMPLETED = "完了"
-    FAILED = "失敗"
+    PENDING = "pending"
+    ACTIVE = "active"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
-_MODEL_DESCRIPTIONS = {
-    "tiny": "最も軽量・高速",
-    "base": "軽量",
-    "small": "既定値。速度と精度のバランスを優先",
-    "medium": "高精度だが処理時間とメモリ使用量が増加",
+_QUEUE_STATE_KEYS = {
+    QueueState.PENDING: "queue_pending",
+    QueueState.ACTIVE: "queue_active",
+    QueueState.COMPLETED: "queue_completed",
+    QueueState.FAILED: "queue_failed",
+}
+
+_MODEL_DESCRIPTION_KEYS = {
+    "tiny": "model_description_tiny",
+    "base": "model_description_base",
+    "small": "model_description_small",
+    "medium": "model_description_medium",
+}
+
+_STAGE_KEYS = {
+    ProgressStage.PREPARING: "stage_preparing",
+    ProgressStage.DOWNLOADING_MODEL: "stage_downloading_model",
+    ProgressStage.TRANSCRIBING: "stage_transcribing",
+    ProgressStage.SAVING: "stage_saving",
+    ProgressStage.COMPLETED: "stage_completed",
 }
 
 # Fixed width applied to every row label so each row's content starts at the
-# same x position, matching the widest label ("出力形式").
-_ROW_LABEL_WIDTH = 64
-
-
-def _row_label(text: str) -> QLabel:
-    label = QLabel(text)
-    label.setFixedWidth(_ROW_LABEL_WIDTH)
-    return label
+# same x position, matching the widest label ("出力形式" / "Output").
+_ROW_LABEL_WIDTH = 88
 
 
 class FileQueueList(QListWidget):
     """File list that doubles as the MP4 drag-and-drop target."""
 
     files_dropped = Signal(object)
-    _PLACEHOLDER_TEXT = "複数のMP4ファイルをここにドロップ（または右のボタンで指定）"
 
     def __init__(self) -> None:
         super().__init__()
@@ -90,7 +99,12 @@ class FileQueueList(QListWidget):
         self.setObjectName("fileList")
         self._visible_rows = 5
         self._cached_row_height: int | None = None
+        self._placeholder_text = ""
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+
+    def set_placeholder_text(self, text: str) -> None:
+        self._placeholder_text = text
+        self.viewport().update()
 
     def sizeHint(self) -> QSize:
         width = super().sizeHint().width()
@@ -151,7 +165,7 @@ class FileQueueList(QListWidget):
         painter.drawText(
             empty_rect,
             int(Qt.AlignmentFlag.AlignCenter) | int(Qt.TextFlag.TextWordWrap),
-            self._PLACEHOLDER_TEXT,
+            self._placeholder_text,
         )
 
 
@@ -164,13 +178,21 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._settings = settings or QSettings("mp4totext", "mp4totext")
         self._clock = clock
+        saved_language = str(self._settings.value("app/language", Language.JA.value, type=str))
+        language = Language.EN if saved_language == Language.EN.value else Language.JA
+        self._i18n = Translator(language)
+        set_qt_language(language)
+        self._retranslators: list[Callable[[], None]] = []
+        self._status_state: tuple[str, dict[str, object]] | None = None
+        self._active_file_state: tuple[str, dict[str, object]] | None = None
         self._timing_started_at: float | None = None
+        self._finished_elapsed: float | None = None
+        self._download_fraction: float | None = None
         self._estimated_seconds: float | None = None
         self._active_file_size = 0
         self._elapsed_timer = QTimer(self)
         self._elapsed_timer.setInterval(1000)
         self._elapsed_timer.timeout.connect(self._update_elapsed_time)
-        self.setWindowTitle("MP4 to Text")
         self.setMinimumSize(680, 460)
         self.resize(720, 560)
         self._sources: list[Path] = []
@@ -180,6 +202,63 @@ class MainWindow(QMainWindow):
         self._model_refresh_pending = False
         self._build_ui()
 
+    def t(self, key: str, **kwargs: object) -> str:
+        return self._i18n.t(key, **kwargs)
+
+    def _tr(self, setter: Callable[[str], None], key: str, **kwargs: object) -> None:
+        def update() -> None:
+            setter(self.t(key, **kwargs))
+
+        self._retranslators.append(update)
+        update()
+
+    def _row_label(self, key: str) -> QLabel:
+        label = QLabel()
+        label.setFixedWidth(_ROW_LABEL_WIDTH)
+        self._tr(label.setText, key)
+        return label
+
+    def _set_language(self, language: Language) -> None:
+        if language == self._i18n.language:
+            return
+        self._i18n.language = language
+        set_qt_language(language)
+        self._settings.setValue("app/language", language.value)
+        self._retranslate()
+
+    def _on_ja_toggled(self, checked: bool) -> None:
+        if checked:
+            self._set_language(Language.JA)
+
+    def _on_en_toggled(self, checked: bool) -> None:
+        if checked:
+            self._set_language(Language.EN)
+
+    def _retranslate(self) -> None:
+        for update in self._retranslators:
+            update()
+        if self._status_state is not None:
+            key, kwargs = self._status_state
+            self.status_label.setText(self.t(key, **kwargs))
+        if self._active_file_state is not None:
+            key, kwargs = self._active_file_state
+            self.active_file_label.setText(self.t(key, **kwargs))
+        self._update_elapsed_time()
+        self.cancel_button.setText(
+            self.t("cancel_model_download") if self._model_refresh_pending else self.t("cancel")
+        )
+        self._update_model_status()
+        self._update_model_description()
+        self._refresh_queue_display()
+
+    def _set_status(self, key: str, **kwargs: object) -> None:
+        self._status_state = (key, kwargs)
+        self.status_label.setText(self.t(key, **kwargs))
+
+    def _set_active_file(self, key: str, **kwargs: object) -> None:
+        self._active_file_state = (key, kwargs)
+        self.active_file_label.setText(self.t(key, **kwargs))
+
     def _build_ui(self) -> None:
         central = QWidget()
         root = QVBoxLayout(central)
@@ -187,46 +266,69 @@ class MainWindow(QMainWindow):
         root.setSpacing(5)
 
         title_row = QHBoxLayout()
-        title = QLabel("MP4 to Text")
+        title = QLabel()
         title.setObjectName("title")
-        subtitle = QLabel("動画を外部へ送信せず、このPCで文字起こしします")
+        self._tr(title.setText, "window_title")
+        self._tr(self.setWindowTitle, "window_title")
+        subtitle = QLabel()
         subtitle.setObjectName("subtitle")
+        self._tr(subtitle.setText, "subtitle")
         title_row.addWidget(title)
         title_row.addSpacing(12)
         title_row.addWidget(subtitle)
         title_row.addStretch()
+        self.lang_ja_button = QPushButton("JP")
+        self.lang_ja_button.setObjectName("compactButton")
+        self.lang_ja_button.setCheckable(True)
+        self.lang_ja_button.setAutoExclusive(True)
+        self.lang_ja_button.setChecked(self._i18n.language == Language.JA)
+        self.lang_ja_button.toggled.connect(self._on_ja_toggled)
+        self.lang_en_button = QPushButton("EN")
+        self.lang_en_button.setObjectName("compactButton")
+        self.lang_en_button.setCheckable(True)
+        self.lang_en_button.setAutoExclusive(True)
+        self.lang_en_button.setChecked(self._i18n.language == Language.EN)
+        self.lang_en_button.toggled.connect(self._on_en_toggled)
+        title_row.addWidget(self.lang_en_button)
+        title_row.addWidget(self.lang_ja_button)
         root.addLayout(title_row)
 
         source_row = QHBoxLayout()
         row_spacing = 8
         source_row.setSpacing(row_spacing)
-        source_row.addWidget(_row_label("動画"), 0, Qt.AlignmentFlag.AlignTop)
+        source_row.addWidget(self._row_label("label_video"), 0, Qt.AlignmentFlag.AlignTop)
         self.file_list = FileQueueList()
         self.file_list.setSpacing(0)
+        self._tr(self.file_list.set_placeholder_text, "drop_hint")
         self.file_list.files_dropped.connect(self._add_sources)
         self.file_list.currentRowChanged.connect(self._update_queue_buttons)
         source_row.addWidget(self.file_list, 1)
-        self.add_files_button = QPushButton("MP4を追加")
+        self.add_files_button = QPushButton()
+        self._tr(self.add_files_button.setText, "add_files")
         self.add_files_button.clicked.connect(self._choose_source)
         source_row.addWidget(self.add_files_button, 0, Qt.AlignmentFlag.AlignTop)
         root.addLayout(source_row)
 
         queue_actions = QHBoxLayout()
         queue_actions.addSpacing(_ROW_LABEL_WIDTH + row_spacing)
-        self.remove_button = QPushButton("削除")
+        self.remove_button = QPushButton()
+        self._tr(self.remove_button.setText, "remove")
         self.remove_button.setObjectName("compactButton")
         self.remove_button.setProperty("danger", True)
         self.remove_button.clicked.connect(self._remove_selected)
-        self.move_up_button = QPushButton("上へ")
+        self.move_up_button = QPushButton()
+        self._tr(self.move_up_button.setText, "move_up")
         self.move_up_button.setObjectName("compactButton")
         self.move_up_button.clicked.connect(lambda: self._move_selected(-1))
-        self.move_down_button = QPushButton("下へ")
+        self.move_down_button = QPushButton()
+        self._tr(self.move_down_button.setText, "move_down")
         self.move_down_button.setObjectName("compactButton")
         self.move_down_button.clicked.connect(lambda: self._move_selected(1))
         queue_actions.addWidget(self.remove_button)
         queue_actions.addWidget(self.move_up_button)
         queue_actions.addWidget(self.move_down_button)
-        self.open_source_folder_button = QPushButton("フォルダを開く")
+        self.open_source_folder_button = QPushButton()
+        self._tr(self.open_source_folder_button.setText, "open_folder")
         self.open_source_folder_button.setObjectName("compactButton")
         self.open_source_folder_button.clicked.connect(self._open_source_folder)
         queue_actions.addWidget(self.open_source_folder_button)
@@ -234,9 +336,11 @@ class MainWindow(QMainWindow):
         root.addLayout(queue_actions)
 
         output_row = QHBoxLayout()
-        output_row.addWidget(_row_label("保存先"))
-        self.same_folder_radio = QRadioButton("動画と同じフォルダ")
-        self.custom_folder_radio = QRadioButton("指定フォルダ")
+        output_row.addWidget(self._row_label("label_destination"))
+        self.same_folder_radio = QRadioButton()
+        self._tr(self.same_folder_radio.setText, "same_folder")
+        self.custom_folder_radio = QRadioButton()
+        self._tr(self.custom_folder_radio.setText, "custom_folder")
         same_folder = bool(self._settings.value("output/same_folder", False, type=bool))
         self.same_folder_radio.setChecked(same_folder)
         self.custom_folder_radio.setChecked(not same_folder)
@@ -248,17 +352,19 @@ class MainWindow(QMainWindow):
         self.output_edit.editingFinished.connect(self._save_output_dir)
         self.output_edit.textChanged.connect(self._refresh_queue_display)
         output_row.addWidget(self.output_edit, 1)
-        self.output_browse_button = QPushButton("参照")
+        self.output_browse_button = QPushButton()
+        self._tr(self.output_browse_button.setText, "browse")
         self.output_browse_button.clicked.connect(self._choose_output_dir)
         output_row.addWidget(self.output_browse_button)
-        self.open_output_button = QPushButton("開く")
+        self.open_output_button = QPushButton()
+        self._tr(self.open_output_button.setText, "open")
         self.open_output_button.clicked.connect(self._open_output_dir)
         output_row.addWidget(self.open_output_button)
         root.addLayout(output_row)
         self._update_output_mode()
 
         settings_row = QHBoxLayout()
-        settings_row.addWidget(_row_label("出力形式"))
+        settings_row.addWidget(self._row_label("label_output_format"))
         self.txt_check = QCheckBox("TXT")
         self.json_check = QCheckBox("JSON")
         self.txt_check.setChecked(True)
@@ -267,7 +373,9 @@ class MainWindow(QMainWindow):
         settings_row.addWidget(self.txt_check)
         settings_row.addWidget(self.json_check)
         settings_row.addSpacing(24)
-        settings_row.addWidget(QLabel("モデル"))
+        model_label = QLabel()
+        self._tr(model_label.setText, "label_model")
+        settings_row.addWidget(model_label)
         self.model_combo = QComboBox()
         self.model_combo.addItems(["tiny", "base", "small", "medium"])
         self.model_combo.setCurrentText("small")
@@ -288,12 +396,12 @@ class MainWindow(QMainWindow):
         status_layout.setContentsMargins(8, 6, 8, 6)
 
         processing_row = QHBoxLayout()
-        processing_row.addWidget(_row_label("処理中"), 0, Qt.AlignmentFlag.AlignTop)
+        processing_row.addWidget(self._row_label("label_processing"), 0, Qt.AlignmentFlag.AlignTop)
         processing_content = QVBoxLayout()
         processing_content.setSpacing(0)
-        self.active_file_label = QLabel("なし")
+        self.active_file_label = QLabel()
         self.active_file_label.setObjectName("activeFile")
-        self.timing_label = QLabel("サイズ: - / 予測: - / 経過: -")
+        self.timing_label = QLabel()
         self.timing_label.setObjectName("timing")
         processing_content.addWidget(self.active_file_label)
         processing_content.addWidget(self.timing_label)
@@ -301,30 +409,34 @@ class MainWindow(QMainWindow):
         status_layout.addLayout(processing_row)
 
         status_row = QHBoxLayout()
-        status_row.addWidget(_row_label("状態"))
-        self.status_label = QLabel("MP4ファイルを選択してください")
+        status_row.addWidget(self._row_label("label_state"))
+        self.status_label = QLabel()
         status_row.addWidget(self.status_label, 1)
         status_layout.addLayout(status_row)
 
         model_row = QHBoxLayout()
-        model_row.addWidget(_row_label("モデル"))
+        model_row.addWidget(self._row_label("label_model"))
         self.model_status_label = QLabel()
         self.model_status_label.setObjectName("modelStatus")
         model_row.addWidget(self.model_status_label, 1)
-        self.delete_model_button = QPushButton("選択モデルを削除")
+        self.delete_model_button = QPushButton()
+        self._tr(self.delete_model_button.setText, "delete_selected_model")
         self.delete_model_button.clicked.connect(self._delete_selected_model)
         model_row.addWidget(self.delete_model_button)
-        self.delete_app_data_button = QPushButton("アプリ情報を削除")
+        self.delete_app_data_button = QPushButton()
+        self._tr(self.delete_app_data_button.setText, "delete_app_data")
         self.delete_app_data_button.clicked.connect(self._delete_app_data)
         model_row.addWidget(self.delete_app_data_button)
         status_layout.addLayout(model_row)
 
         debug_row = QHBoxLayout()
-        debug_row.addWidget(QLabel("デバッグ"), 0, Qt.AlignmentFlag.AlignTop)
+        debug_label = QLabel()
+        self._tr(debug_label.setText, "label_debug")
+        debug_row.addWidget(debug_label, 0, Qt.AlignmentFlag.AlignTop)
         self.debug_output = QPlainTextEdit()
         self.debug_output.setReadOnly(True)
         self.debug_output.setFixedHeight(self.debug_output.fontMetrics().height() * 2 + 8)
-        self.debug_output.setPlaceholderText("エラーの詳細がここに表示されます")
+        self._tr(self.debug_output.setPlaceholderText, "debug_placeholder")
         self.debug_output.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         debug_row.addWidget(self.debug_output, 1)
         status_layout.addLayout(debug_row)
@@ -332,13 +444,16 @@ class MainWindow(QMainWindow):
 
         actions = QHBoxLayout()
         actions.addStretch()
-        self.cancel_button = QPushButton("キャンセル")
+        self.cancel_button = QPushButton()
+        self._tr(self.cancel_button.setText, "cancel")
         self.cancel_button.setObjectName("cancelButton")
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self._cancel)
-        self.exit_button = QPushButton("終了")
+        self.exit_button = QPushButton()
+        self._tr(self.exit_button.setText, "exit")
         self.exit_button.clicked.connect(self.close)
-        self.start_button = QPushButton("文字起こしを開始")
+        self.start_button = QPushButton()
+        self._tr(self.start_button.setText, "start")
         self.start_button.setObjectName("primaryButton")
         self.start_button.setEnabled(False)
         self.start_button.clicked.connect(self._start)
@@ -349,12 +464,18 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(central)
         self.setStyleSheet(_STYLESHEET)
+        self._set_status("select_mp4_prompt")
+        self._set_active_file("none")
+        self.timing_label.setText(self.t("timing_placeholder"))
         self._update_queue_buttons()
         self._update_model_status()
         self._update_model_description()
 
     def _choose_source(self) -> None:
-        file_names, _ = QFileDialog.getOpenFileNames(self, "MP4を選択", "", "MP4 (*.mp4)")
+        file_names, _ = QFileDialog.getOpenFileNames(
+            self, self.t("select_mp4_dialog_title"), "", "MP4 (*.mp4)",
+            options=QFileDialog.Option.DontUseNativeDialog,
+        )
         if file_names:
             self._add_sources(tuple(Path(file_name) for file_name in file_names))
 
@@ -368,7 +489,7 @@ class MainWindow(QMainWindow):
                 added.append(source)
         if added and self._worker is not None:
             self._worker.add_pending(tuple(added))
-        self.status_label.setText(f"{len(self._sources)} ファイルを選択中")
+        self._set_status("files_selected", count=len(self._sources))
         self.start_button.setEnabled(self._thread is None and bool(self._sources))
         self._update_queue_buttons()
 
@@ -386,7 +507,7 @@ class MainWindow(QMainWindow):
         self.file_list.takeItem(row)
         self._sources.pop(row)
         self._states.pop(row)
-        self.status_label.setText(f"{len(self._sources)} ファイルを選択中")
+        self._set_status("files_selected", count=len(self._sources))
         self.start_button.setEnabled(self._thread is None and self._has_pending())
         self._update_queue_buttons()
 
@@ -423,16 +544,21 @@ class MainWindow(QMainWindow):
             return
         directory = self._sources[row].parent
         if not directory.is_dir():
-            QMessageBox.warning(self, "フォルダ", f"フォルダーが見つかりません。\n{directory}")
+            QMessageBox.warning(
+                self, self.t("folder_title"), self.t("folder_not_found", path=directory)
+            )
             return
         try:
             os.startfile(directory.resolve())
-        except OSError as error:
-            self._append_debug(f"フォルダを開けませんでした\n{traceback.format_exc()}")
-            QMessageBox.critical(self, "フォルダ", str(error))
+        except OSError:
+            self._append_debug(f"{self.t('folder_open_failed')}\n{traceback.format_exc()}")
+            self._show_error("folder_title", "folder_open_failed")
 
     def _choose_output_dir(self) -> None:
-        directory = QFileDialog.getExistingDirectory(self, "保存先を選択")
+        directory = QFileDialog.getExistingDirectory(
+            self, self.t("select_destination_dialog_title"),
+            options=QFileDialog.Option.ShowDirsOnly | QFileDialog.Option.DontUseNativeDialog,
+        )
         if directory:
             self.output_edit.setText(directory)
             self._save_output_dir()
@@ -448,13 +574,15 @@ class MainWindow(QMainWindow):
     def _open_output_dir(self) -> None:
         directory = Path(self.output_edit.text().strip())
         if not directory.is_dir():
-            QMessageBox.warning(self, "保存先", f"フォルダーが見つかりません。\n{directory}")
+            QMessageBox.warning(
+                self, self.t("destination_title"), self.t("folder_not_found", path=directory)
+            )
             return
         try:
             os.startfile(directory.resolve())
-        except OSError as error:
-            self._append_debug(f"保存先を開けませんでした\n{traceback.format_exc()}")
-            QMessageBox.critical(self, "保存先", str(error))
+        except OSError:
+            self._append_debug(f"{self.t('destination_open_failed')}\n{traceback.format_exc()}")
+            self._show_error("destination_title", "destination_open_failed")
 
     def _selected_formats(self) -> tuple[OutputFormat, ...]:
         selections = (
@@ -472,7 +600,9 @@ class MainWindow(QMainWindow):
         self._save_output_dir()
         formats = self._selected_formats()
         if not formats:
-            QMessageBox.warning(self, "出力形式", "出力形式を1つ以上選択してください。")
+            QMessageBox.warning(
+                self, self.t("output_format_title"), self.t("output_format_required")
+            )
             return
 
         output_dir = (
@@ -490,8 +620,8 @@ class MainWindow(QMainWindow):
         overwrite = any(path.exists() for path in existing)
         if overwrite and QMessageBox.question(
             self,
-            "上書き確認",
-            "既存の出力ファイルを上書きしますか？",
+            self.t("overwrite_confirm_title"),
+            self.t("overwrite_confirm_message"),
         ) != QMessageBox.StandardButton.Yes:
             return
 
@@ -521,7 +651,7 @@ class MainWindow(QMainWindow):
     def _set_running(self, running: bool) -> None:
         self.start_button.setEnabled(not running and self._has_pending())
         self.cancel_button.setEnabled(running)
-        self.cancel_button.setText("キャンセル")
+        self.cancel_button.setText(self.t("cancel"))
         self.file_list.setEnabled(True)
         self.model_combo.setEnabled(not running)
         self.delete_model_button.setEnabled(not running)
@@ -542,7 +672,7 @@ class MainWindow(QMainWindow):
         self._states[row] = QueueState.ACTIVE
         self.file_list.setCurrentRow(row)
         self.file_list.item(row).setText(self._queue_text(source, QueueState.ACTIVE))
-        self.active_file_label.setText(f"{source.name} ({index}/{total})")
+        self._set_active_file("active_file_progress", name=source.name, index=index, total=total)
         self._active_file_size = file_size
         self._estimated_seconds = estimate_seconds(
             self.model_combo.currentText(),
@@ -550,23 +680,29 @@ class MainWindow(QMainWindow):
             load_history(self._settings),
         )
         self._timing_started_at = self._clock()
+        self._finished_elapsed = None
         self._elapsed_timer.start()
         self._update_elapsed_time()
 
     def _on_progress(self, event: ProgressEvent) -> None:
-        self.status_label.setText(event.message)
+        stage_key = _STAGE_KEYS.get(event.stage)
+        if stage_key is not None:
+            self._set_status(stage_key)
+        else:
+            self.status_label.setText(event.message)
         if event.stage is ProgressStage.DOWNLOADING_MODEL:
             self._model_refresh_pending = True
+            self._download_fraction = event.fraction
             self.cancel_button.setEnabled(True)
-            self.cancel_button.setText("モデル取得をキャンセル")
+            self.cancel_button.setText(self.t("cancel_model_download"))
             if event.fraction is None:
-                model_state = "準備中"
+                model_state = self.t("preparing")
             else:
-                model_state = f"ダウンロード中 ({event.fraction:.0%})"
+                model_state = self.t("downloading", percent=f"{event.fraction:.0%}")
             self.model_status_label.setText(f"{self.model_combo.currentText()} / {model_state}")
         elif event.stage is ProgressStage.TRANSCRIBING and self._model_refresh_pending:
             self._model_refresh_pending = False
-            self.cancel_button.setText("キャンセル")
+            self.cancel_button.setText(self.t("cancel"))
             self._update_model_status()
 
     def _on_file_completed(
@@ -594,19 +730,19 @@ class MainWindow(QMainWindow):
         self._append_debug(f"{source}\n{message}")
 
     def _on_batch_completed(self, completed: int, failed: int) -> None:
-        self.active_file_label.setText("なし")
-        self.status_label.setText(f"完了: {completed}件 / 失敗: {failed}件")
+        self._set_active_file("none")
+        self._set_status("batch_completed_status", completed=completed, failed=failed)
         QMessageBox.information(
             self,
-            "文字起こし完了",
-            f"{completed}件を文字起こししました。失敗: {failed}件",
+            self.t("batch_completed_title"),
+            self.t("batch_completed_message", completed=completed, failed=failed),
         )
 
     def _on_cancelled(self) -> None:
         self._finish_timing()
         self._model_refresh_pending = False
-        self.status_label.setText("キャンセルしました")
-        self.active_file_label.setText("なし")
+        self._set_status("cancelled_status")
+        self._set_active_file("none")
         for row, state in enumerate(self._states):
             if state is QueueState.ACTIVE:
                 self._states[row] = QueueState.PENDING
@@ -614,66 +750,73 @@ class MainWindow(QMainWindow):
 
     def _cancel(self) -> None:
         if self._worker is not None:
-            self.status_label.setText("キャンセルしています")
+            self._set_status("cancelling_status")
             self.cancel_button.setEnabled(False)
             self._worker.cancel()
 
     def _job_finished(self) -> None:
         self._thread = None
         self._worker = None
+        self._model_refresh_pending = False
         self._set_running(False)
         self._update_model_status()
 
     def _update_elapsed_time(self) -> None:
+        if self._timing_started_at is None and self._finished_elapsed is None:
+            self.timing_label.setText(self.t("timing_placeholder"))
+            return
         elapsed = (
             max(self._clock() - self._timing_started_at, 0.0)
             if self._timing_started_at is not None
-            else 0.0
+            else self._finished_elapsed or 0.0
         )
         estimate = (
-            format_duration(self._estimated_seconds)
+            format_duration(self._estimated_seconds, self._i18n.language)
             if self._estimated_seconds is not None
-            else "履歴なし"
+            else self.t("history_none")
         )
         self.timing_label.setText(
-            f"サイズ: {format_size(self._active_file_size)} / "
-            f"予測: {estimate} / 経過: {format_duration(elapsed)}"
+            self.t(
+                "timing_text",
+                size=format_size(self._active_file_size),
+                estimate=estimate,
+                elapsed=format_duration(elapsed, self._i18n.language),
+            )
         )
 
     def _finish_timing(self, elapsed_seconds: float | None = None) -> None:
         self._elapsed_timer.stop()
         if elapsed_seconds is None and self._timing_started_at is not None:
             elapsed_seconds = max(self._clock() - self._timing_started_at, 0.0)
-        if elapsed_seconds is not None:
-            estimate = (
-                format_duration(self._estimated_seconds)
-                if self._estimated_seconds is not None
-                else "履歴なし"
-            )
-            self.timing_label.setText(
-                f"サイズ: {format_size(self._active_file_size)} / "
-                f"予測: {estimate} / 経過: {format_duration(elapsed_seconds)}"
-            )
+        self._finished_elapsed = elapsed_seconds
         self._timing_started_at = None
+        self._update_elapsed_time()
 
     def _update_model_description(self) -> None:
-        self.model_description_label.setText(
-            _MODEL_DESCRIPTIONS.get(self.model_combo.currentText(), "")
-        )
+        key = _MODEL_DESCRIPTION_KEYS.get(self.model_combo.currentText())
+        self.model_description_label.setText(self.t(key) if key is not None else "")
 
     def _update_model_status(self) -> None:
         model_name = self.model_combo.currentText()
+        if self._model_refresh_pending:
+            state = (
+                self.t("preparing")
+                if self._download_fraction is None
+                else self.t("downloading", percent=f"{self._download_fraction:.0%}")
+            )
+            self.model_status_label.setText(f"{model_name} / {state}")
+            return
         try:
             status = inspect_model_cache(model_name)
         except Exception:
-            self.model_status_label.setText(f"{model_name} / 状態確認エラー")
+            self.model_status_label.setText(f"{model_name} / {self.t('status_check_error')}")
             self.delete_model_button.setEnabled(False)
-            self._append_debug(f"モデル状態の確認に失敗しました\n{traceback.format_exc()}")
+            self._append_debug(f"{self.t('model_status_failed_debug')}\n{traceback.format_exc()}")
             return
         if status.downloaded:
-            text = f"{model_name} / ダウンロード済み ({format_size(status.size_bytes)})"
+            text = f"{model_name} / {self.t('downloaded', size=format_size(status.size_bytes))}"
         else:
-            text = f"{model_name} / 未ダウンロード"
+            text = f"{model_name} / {self.t('not_downloaded')}"
         self.model_status_label.setText(text)
         self.delete_model_button.setEnabled(status.downloaded and self._thread is None)
 
@@ -681,30 +824,32 @@ class MainWindow(QMainWindow):
         model_name = self.model_combo.currentText()
         if QMessageBox.question(
             self,
-            "モデル削除",
-            f"ダウンロード済みの {model_name} モデルを削除しますか？",
+            self.t("model_delete_title"),
+            self.t("model_delete_confirm", model=model_name),
         ) != QMessageBox.StandardButton.Yes:
             return
         try:
             delete_model_cache(model_name)
-        except (OSError, RuntimeError) as error:
-            self._append_debug(f"モデル削除に失敗しました\n{traceback.format_exc()}")
-            QMessageBox.critical(self, "モデル削除エラー", str(error))
+        except (OSError, RuntimeError):
+            self._append_debug(f"{self.t('model_delete_failed_debug')}\n{traceback.format_exc()}")
+            self._show_error("model_delete_error_title", "model_delete_failed_debug")
             return
         self._update_model_status()
 
     def _delete_app_data(self) -> None:
         if QMessageBox.question(
             self,
-            "アプリ情報の削除",
-            "ダウンロード済みモデルを含む、このアプリのキャッシュをすべて削除しますか？",
+            self.t("app_data_delete_title"),
+            self.t("app_data_delete_confirm"),
         ) != QMessageBox.StandardButton.Yes:
             return
         try:
             delete_app_cache()
-        except (OSError, RuntimeError) as error:
-            self._append_debug(f"アプリ情報削除に失敗しました\n{traceback.format_exc()}")
-            QMessageBox.critical(self, "アプリ情報削除エラー", str(error))
+        except (OSError, RuntimeError):
+            self._append_debug(
+                f"{self.t('app_data_delete_failed_debug')}\n{traceback.format_exc()}"
+            )
+            self._show_error("app_data_delete_error_title", "app_data_delete_failed_debug")
             return
         self._settings.clear()
         self.output_edit.setText(self._default_output_dir())
@@ -730,32 +875,41 @@ class MainWindow(QMainWindow):
     def _queue_text(self, source: Path, state: QueueState) -> str:
         size_text = self._file_size_text(source)
         prediction = self._prediction_text(source)
+        state_text = self.t(_QUEUE_STATE_KEYS[state])
         if self._is_transcribed(source):
-            return (
-                f"[{state.value} / 文字起こし済み] {source.name} "
-                f"({size_text}) / 予測: {prediction}"
+            return self.t(
+                "queue_item_transcribed",
+                state=state_text,
+                transcribed=self.t("queue_transcribed"),
+                name=source.name,
+                size=size_text,
+                prediction=prediction,
             )
-        return f"[{state.value}] {source.name} ({size_text}) / 予測: {prediction}"
+        return self.t(
+            "queue_item", state=state_text, name=source.name, size=size_text, prediction=prediction
+        )
 
-    @staticmethod
-    def _file_size_text(source: Path) -> str:
+    def _file_size_text(self, source: Path) -> str:
         try:
             size_bytes = source.stat().st_size
         except OSError:
-            return "算出不可"
+            return self.t("size_unavailable")
         return f"{size_bytes / (1024 * 1024):.1f} MB"
 
     def _prediction_text(self, source: Path) -> str:
         try:
             file_size = source.stat().st_size
         except OSError:
-            return "算出不可"
+            return self.t("size_unavailable")
         predicted = estimate_seconds(
             self.model_combo.currentText(),
             file_size,
             load_history(self._settings),
         )
-        return format_duration(predicted) if predicted is not None else "履歴なし"
+        return (
+            format_duration(predicted, self._i18n.language)
+            if predicted is not None else self.t("history_none")
+        )
 
     def _refresh_queue_display(self) -> None:
         for row, (source, state) in enumerate(
@@ -797,12 +951,18 @@ class MainWindow(QMainWindow):
         scroll_bar = self.debug_output.verticalScrollBar()
         scroll_bar.setValue(scroll_bar.maximum())
 
+    def _show_error(self, title_key: str, message_key: str) -> None:
+        QMessageBox.critical(
+            self, self.t(title_key),
+            f"{self.t(message_key)}\n{self.t('error_details_hint')}",
+        )
+
     def closeEvent(self, event: QCloseEvent) -> None:
         if self._thread is not None and self._thread.isRunning():
             QMessageBox.information(
                 self,
-                "処理中",
-                "文字起こしをキャンセルしてから終了してください。",
+                self.t("processing_in_progress_title"),
+                self.t("processing_in_progress_message"),
             )
             event.ignore()
             return
@@ -844,6 +1004,12 @@ QPushButton#compactButton {
     min-height: 16px;
     font-size: 10px;
     padding: 0 6px;
+}
+QPushButton#compactButton:checkable:checked {
+    background: #19633d;
+    color: #ffffff;
+    border-color: #19633d;
+    font-weight: 600;
 }
 QPushButton[danger="true"] { background: #f6d9d6; border-color: #d98b83; color: #7a2b23; }
 QPushButton[danger="true"]:hover { background: #f0c4bf; border-color: #a33a32; }
