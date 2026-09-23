@@ -8,9 +8,10 @@ from PySide6.QtWidgets import QApplication
 from pytestqt.qtbot import QtBot
 
 from mp4totext.application import OutputFormat, TranscriptionResult
-from mp4totext.domain import ProgressEvent, ProgressStage
+from mp4totext.domain import ProgressEvent, ProgressStage, TranscriptionOptions
 from mp4totext.engine.model_cache import ModelCacheStatus
 from mp4totext.gui import main_window
+from mp4totext.gui.job_controller import TranscriptionWorker
 from mp4totext.gui.main_window import MainWindow, QueueState
 from mp4totext.gui.processing_history import ProcessingMetrics, append_history, load_history
 
@@ -91,6 +92,51 @@ def test_processed_file_cannot_be_removed(qtbot: QtBot) -> None:
     window._remove_selected()
 
     assert window._sources == [Path("done.mp4")]
+
+
+def test_pending_file_can_be_removed_while_running(qtbot: QtBot) -> None:
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._add_sources((Path("first.mp4"), Path("second.mp4")))
+    window._set_running(True)
+    window._on_file_started(Path("first.mp4"), 1, 2, 0)
+    window._worker = TranscriptionWorker(
+        (Path("second.mp4"),),
+        None,
+        (OutputFormat.TXT,),
+        TranscriptionOptions(),
+        False,
+    )
+    window.file_list.setCurrentRow(1)
+
+    window._remove_selected()
+
+    assert window._sources == [Path("first.mp4")]
+    assert not window.start_button.isEnabled()
+
+
+def test_file_added_while_running_is_registered_with_the_worker(qtbot: QtBot) -> None:
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._add_sources((Path("first.mp4"),))
+    window._set_running(True)
+    window._on_file_started(Path("first.mp4"), 1, 1, 0)
+    window._worker = TranscriptionWorker(
+        (),
+        None,
+        (OutputFormat.TXT,),
+        TranscriptionOptions(),
+        False,
+    )
+
+    window._add_sources((Path("added_mid_run.mp4"),))
+
+    assert cast(Any, window._worker)._pending == [Path("added_mid_run.mp4")]
+
+    window.file_list.setCurrentRow(1)
+    window._remove_selected()
+
+    assert window._sources == [Path("first.mp4")]
 
 
 def test_model_dropdown_shows_download_status(

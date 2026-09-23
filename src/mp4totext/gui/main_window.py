@@ -246,11 +246,15 @@ class MainWindow(QMainWindow):
         self._add_sources((source,))
 
     def _add_sources(self, sources: tuple[Path, ...]) -> None:
+        added: list[Path] = []
         for source in sources:
             if source not in self._sources:
                 self._sources.append(source)
                 self._states.append(QueueState.PENDING)
                 self.file_list.addItem(self._queue_text(source, QueueState.PENDING))
+                added.append(source)
+        if added and self._worker is not None:
+            self._worker.add_pending(tuple(added))
         self.drop_area.label.setText(f"{len(self._sources)} ファイルを選択中")
         self.status_label.setText("準備完了")
         self.start_button.setEnabled(self._thread is None and bool(self._sources))
@@ -267,7 +271,7 @@ class MainWindow(QMainWindow):
         self._sources.pop(row)
         self._states.pop(row)
         self.drop_area.label.setText(f"{len(self._sources)} ファイルを選択中")
-        self.start_button.setEnabled(self._has_pending())
+        self.start_button.setEnabled(self._thread is None and self._has_pending())
         self._update_queue_buttons()
 
     def _move_selected(self, offset: int) -> None:

@@ -55,6 +55,23 @@ def test_worker_can_remove_and_reorder_pending_files() -> None:
     assert cast(Any, worker)._pending == [sources[2], sources[0]]
 
 
+def test_worker_can_add_and_then_remove_a_pending_file() -> None:
+    worker = job_controller.TranscriptionWorker(
+        (),
+        None,
+        (OutputFormat.TXT,),
+        TranscriptionOptions(),
+        False,
+    )
+    added = Path("added.mp4")
+
+    worker.add_pending((added,))
+
+    assert cast(Any, worker)._pending == [added]
+    assert worker.remove_pending(added)
+    assert cast(Any, worker)._pending == []
+
+
 def test_worker_reports_file_size_model_and_elapsed_time(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -99,6 +99,10 @@ class TranscriptionWorker(QObject):
             self._pending.remove(source)
             return True
 
+    def add_pending(self, sources: tuple[Path, ...]) -> None:
+        with self._pending_lock:
+            self._pending.extend(source for source in sources if source not in self._pending)
+
     def reorder_pending(self, sources: tuple[Path, ...]) -> None:
         with self._pending_lock:
             if set(sources) == set(self._pending):
